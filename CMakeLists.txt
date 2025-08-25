@@ -124,6 +124,11 @@ set(SOURCES
     src/routes/models_route.cpp
     src/routes/engines_route.cpp
     src/routes/health_status_route.cpp    
+    src/routes/system_metrics_route.cpp
+    src/metrics/metric_registry.cpp
+    src/metrics/formatters.cpp
+    src/metrics/system_metrics.cpp
+    src/metrics/llm_metrics.cpp
     src/routes/config/auth_config_route.cpp    
     src/routes/server_logs_route.cpp    
     src/routes/retrieval/embedding_route.cpp

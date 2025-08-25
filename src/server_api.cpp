@@ -15,6 +15,7 @@
 #include "kolosal/routes/models_route.hpp"
 #include "kolosal/routes/engines_route.hpp"
 #include "kolosal/routes/health_status_route.hpp"
+#include "kolosal/routes/system_metrics_route.hpp"
 #include "kolosal/routes/server_logs_route.hpp"
 #include "kolosal/routes/downloads_route.hpp"
 
@@ -159,9 +160,9 @@ namespace kolosal
             throw std::runtime_error("Server not initialized - call init() first");
         }
 
-        ServerLogger::logInfo("Metrics functionality not yet implemented");
-        // TODO: Add metrics routes when they are implemented
-        // pImpl->server->addRoute(std::make_unique<SystemMetricsRoute>());
+        ServerLogger::logInfo("Enabling system metrics endpoint");
+        pImpl->server->addRoute(std::make_unique<SystemMetricsRoute>());
+        // TODO: Add completion metrics route when implemented
         // pImpl->server->addRoute(std::make_unique<CompletionMetricsRoute>());
     }
 
