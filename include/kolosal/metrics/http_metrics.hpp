@@ -3,6 +3,7 @@
 
 #include "metric_types.hpp"
 #include "metric_registry.hpp"
+#include "../utils.hpp"
 #include <chrono>
 #include <string>
 #include <memory>
@@ -79,30 +80,51 @@ namespace metrics {
     // RAII helper for tracking request lifecycle
     class HTTPRequestTracker {
     public:
-        HTTPRequestTracker(const std::string& method, const std::string& path)
-            : method_(method), path_(path), start_time_(std::chrono::steady_clock::now()) {
-            HTTPMetricsCollector::instance().record_request_start(method, path);
-        }
-        
-        ~HTTPRequestTracker() {
-            // If not explicitly completed, record as error
-            if (!completed_) {
-                complete(500, 0, 0);
+        HTTPRequestTracker(const std::string& method, const std::string& path, size_t request_size = 0)
+            : method_(method), path_(path), request_size_(request_size),
+              start_time_(std::chrono::steady_clock::now()),
+              skip_metrics_(path == "/metrics" || path == "/v1/metrics" || path == "/system-metrics") {
+            if (!skip_metrics_) {
+                http_internal::set_request_context(method, path, request_size, true);
+                HTTPMetricsCollector::instance().record_request_start(method, path);
             }
         }
         
-        void complete(int status_code, size_t request_size, size_t response_size) {
-            if (!completed_) {
+        ~HTTPRequestTracker() {
+            // Try to complete from context if not already done
+            if (!completed_ && !skip_metrics_) {
+                complete_from_context();
+                // If still not completed (no response sent), record as error
+                if (!completed_) {
+                    complete(500, 0);
+                }
+            }
+            http_internal::clear_request_context();
+        }
+        
+        void complete(int status_code, size_t response_size) {
+            if (!completed_ && !skip_metrics_) {
                 HTTPMetricsCollector::instance().record_request_complete(
-                    method_, path_, status_code, request_size, response_size, start_time_);
+                    method_, path_, status_code, request_size_, response_size, start_time_);
                 completed_ = true;
+            }
+        }
+        
+        void complete_from_context() {
+            if (!skip_metrics_ && !completed_) {
+                auto& ctx = http_internal::g_request_context;
+                if (ctx.response_status != -1) {
+                    complete(ctx.response_status, ctx.response_size);
+                }
             }
         }
         
     private:
         std::string method_;
         std::string path_;
+        size_t request_size_;
         std::chrono::steady_clock::time_point start_time_;
+        bool skip_metrics_;
         bool completed_ = false;
     };
 

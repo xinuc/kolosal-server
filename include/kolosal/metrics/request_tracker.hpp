@@ -1,10 +1,10 @@
 #pragma once
 
 #include "llm_metrics.hpp"
-#include "http_metrics.hpp"
 #include <string>
 #include <chrono>
 #include <memory>
+#include <atomic>
 
 namespace kolosal {
 namespace metrics {
