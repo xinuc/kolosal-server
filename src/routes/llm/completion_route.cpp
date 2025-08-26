@@ -3,6 +3,7 @@
 #include "kolosal/server_api.hpp"
 #include "kolosal/logger.hpp"
 #include "kolosal/node_manager.h"
+#include "kolosal/metrics/request_tracker.hpp"
 
 #include "inference_interface.h"
 #include <json.hpp>
@@ -315,6 +316,9 @@ namespace kolosal
 
     void CompletionRoute::handleChatCompletion(SocketType sock, const std::string& body)
     {
+        // Simple one-line metrics tracking
+        metrics::LLMRequestTracker tracker("chat");
+        
         try
         {
             auto j = json::parse(body);
@@ -361,6 +365,8 @@ namespace kolosal
                 {
                     throw std::runtime_error("Failed to submit chat completion job to inference engine");
                 }
+                
+                tracker.scheduled(); // Simple one-liner
 
                 // Start the streaming response with proper SSE headers
                 begin_streaming_response(sock, 200, {{"Content-Type", "text/event-stream"}, {"Cache-Control", "no-cache"}});
@@ -368,6 +374,7 @@ namespace kolosal
                 bool firstTokenRecorded = false;
                 std::string previousText = "";
                 size_t lastTokenCount = 0;
+                size_t total_tokens_generated = 0;
 
                 // Poll for results until job is finished
                 while (!engine->isJobFinished(jobId))
@@ -401,7 +408,15 @@ namespace kolosal
                         if (!firstTokenRecorded && result.text.length() > 0)
                         {
                             firstTokenRecorded = true;
+                            tracker.first_token(); // Simple one-liner
                         }
+                        
+                        // Record token generation - simple loop
+                        size_t new_tokens = result.tokens.size() - lastTokenCount;
+                        for (size_t i = 0; i < new_tokens; i++) {
+                            tracker.token_generated();
+                        }
+                        total_tokens_generated = result.tokens.size();
 
                         std::string newContent = result.text.substr(previousText.length());
 
@@ -437,16 +452,18 @@ namespace kolosal
 
                 // Then terminate the stream
                 send_stream_chunk(sock, StreamChunk("", true));
-
-                if (engine->hasJobError(jobId))
-                {
+                
+                // Simple finish tracking
+                if (engine->hasJobError(jobId)) {
+                    tracker.finish(metrics::FinishReason::ERROR);
+                } else if (total_tokens_generated >= params.maxNewTokens) {
+                    tracker.finish(metrics::FinishReason::LENGTH);
+                } else {
+                    tracker.finish(metrics::FinishReason::COMPLETED);
                 }
-                else
-                {
-                }
 
-                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d",
-                                      std::this_thread::get_id(), jobId);
+                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d (%zu tokens generated)",
+                                      std::this_thread::get_id(), jobId, total_tokens_generated);
             }
             else
             {
@@ -461,6 +478,9 @@ namespace kolosal
                 {
                     throw std::runtime_error("Failed to submit chat completion job to inference engine");
                 }
+                
+                // Record that request has been scheduled
+                tracker.scheduled();
 
                 // Wait for job completion
                 engine->waitForJob(jobId);
@@ -474,13 +494,17 @@ namespace kolosal
 
                 // Get the final result
                 CompletionResult result = engine->getJobResult(jobId);
+                
+                // Simple completion tracking
+                tracker.finish(result.tokens.size() >= params.maxNewTokens ? 
+                              metrics::FinishReason::LENGTH : metrics::FinishReason::COMPLETED);
 
                 // Convert result to JSON and send response
                 json response = completionResultToJson(result);
                 send_response(sock, 200, response.dump());
 
-                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec)",
-                                      std::this_thread::get_id(), jobId, result.tps);
+                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec, %zu tokens)",
+                                      std::this_thread::get_id(), jobId, result.tps, result.tokens.size());
             }
         }
         catch (const json::exception& ex)
@@ -506,6 +530,9 @@ namespace kolosal
 
     void CompletionRoute::handleTextCompletion(SocketType sock, const std::string& body)
     {
+        // Simple one-line metrics tracking
+        metrics::LLMRequestTracker tracker("text");
+        
         try
         {
             auto j = json::parse(body);
@@ -556,6 +583,7 @@ namespace kolosal
                 bool firstTokenRecorded = false;
                 std::string previousText = "";
                 size_t lastTokenCount = 0;
+                size_t total_tokens_generated = 0;
 
                 // Poll for results until job is finished
                 while (!engine->isJobFinished(jobId))
@@ -589,7 +617,15 @@ namespace kolosal
                         if (!firstTokenRecorded && result.text.length() > 0)
                         {
                             firstTokenRecorded = true;
+                            tracker.first_token(); // Simple one-liner
                         }
+                        
+                        // Record token generation - simple loop
+                        size_t new_tokens = result.tokens.size() - lastTokenCount;
+                        for (size_t i = 0; i < new_tokens; i++) {
+                            tracker.token_generated();
+                        }
+                        total_tokens_generated = result.tokens.size();
 
                         std::string newContent = result.text.substr(previousText.length());
 
@@ -625,16 +661,18 @@ namespace kolosal
 
                 // Then terminate the stream
                 send_stream_chunk(sock, StreamChunk("", true));
-
-                if (engine->hasJobError(jobId))
-                {
+                
+                // Simple finish tracking
+                if (engine->hasJobError(jobId)) {
+                    tracker.finish(metrics::FinishReason::ERROR);
+                } else if (total_tokens_generated >= params.maxNewTokens) {
+                    tracker.finish(metrics::FinishReason::LENGTH);
+                } else {
+                    tracker.finish(metrics::FinishReason::COMPLETED);
                 }
-                else
-                {
-                }
 
-                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d",
-                                      std::this_thread::get_id(), jobId);
+                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d (%zu tokens generated)",
+                                      std::this_thread::get_id(), jobId, total_tokens_generated);
             }
             else
             {
@@ -662,13 +700,17 @@ namespace kolosal
 
                 // Get the final result
                 CompletionResult result = engine->getJobResult(jobId);
+                
+                // Simple completion tracking
+                tracker.finish(result.tokens.size() >= params.maxNewTokens ? 
+                              metrics::FinishReason::LENGTH : metrics::FinishReason::COMPLETED);
 
                 // Convert result to JSON and send response
                 json response = completionResultToJson(result);
                 send_response(sock, 200, response.dump());
 
-                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec)",
-                                      std::this_thread::get_id(), jobId, result.tps);
+                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec, %zu tokens)",
+                                      std::this_thread::get_id(), jobId, result.tps, result.tokens.size());
             }
         }
         catch (const json::exception& ex)

@@ -5,6 +5,7 @@
 #include "kolosal/server_api.hpp"
 #include "kolosal/logger.hpp"
 #include "kolosal/node_manager.h"
+#include "kolosal/metrics/request_tracker.hpp"
 // #include "kolosal/completion_monitor.hpp"
 #include "inference_interface.h"
 #include <json.hpp>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <algorithm>
 #include <regex>
+#include <sstream>
 
 using json = nlohmann::json;
 
@@ -36,7 +38,9 @@ bool EmbeddingRoute::match(const std::string& method, const std::string& path)
 
 void EmbeddingRoute::handle(SocketType sock, const std::string& body)
 {
-    std::string requestId; // Declare here so it's accessible in catch blocks
+    // Simple one-line metrics tracking
+    metrics::LLMRequestTracker tracker("embedding");
+    std::string requestId; // For backwards compatibility with monitoring
 
     try
     {
@@ -90,7 +94,7 @@ void EmbeddingRoute::handle(SocketType sock, const std::string& body)
             return;
         }
 
-        // Generate unique request ID
+        // Generate unique request ID (for monitoring compatibility)
         requestId = "emb-" + std::to_string(++request_counter_) + "-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 
         // Get input texts
@@ -138,6 +142,7 @@ void EmbeddingRoute::handle(SocketType sock, const std::string& body)
             catch (const std::exception& ex)
             {
                 // monitor_->failRequest(requestId);
+                // Tracker destructor will handle error cleanup automatically
                 sendErrorResponse(sock, 500, "Failed to generate embedding for input " + std::to_string(i) + ": " + ex.what(), "server_error");
                 return;
             }
@@ -148,6 +153,9 @@ void EmbeddingRoute::handle(SocketType sock, const std::string& body)
 
         // Complete monitoring
         // monitor_->completeRequest(requestId);
+        
+        // Mark successful completion
+        tracker.finish(metrics::FinishReason::COMPLETED);
 
         // Send successful response
         send_response(sock, 200, response.to_json().dump());
@@ -162,6 +170,7 @@ void EmbeddingRoute::handle(SocketType sock, const std::string& body)
         {
             // monitor_->failRequest(requestId);
         }
+        // Note: tracker destructor automatically handles cleanup
 
         ServerLogger::logError("[Thread %u] JSON parsing error: %s", std::this_thread::get_id(), ex.what());
         sendErrorResponse(sock, 400, "Invalid JSON: " + std::string(ex.what()));
@@ -173,6 +182,7 @@ void EmbeddingRoute::handle(SocketType sock, const std::string& body)
         {
             // monitor_->failRequest(requestId);
         }
+        // Note: tracker destructor automatically handles cleanup
 
         ServerLogger::logError("[Thread %u] Error handling embedding request: %s", std::this_thread::get_id(), ex.what());
         sendErrorResponse(sock, 500, "Internal server error: " + std::string(ex.what()), "server_error");
