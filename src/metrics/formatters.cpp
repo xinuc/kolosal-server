@@ -1,6 +1,4 @@
 #include "kolosal/metrics/formatters.hpp"
-#include <iomanip>
-#include <algorithm>
 
 namespace kolosal {
 namespace metrics {

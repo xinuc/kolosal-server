@@ -16,7 +16,6 @@
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
 #include <filesystem>
-#include <regex>
 #endif
 
 namespace kolosal
