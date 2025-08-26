@@ -416,8 +416,10 @@ void DocumentsRoute::handleDocumentsInfo(SocketType sock, const std::string& bod
         kolosal::retrieval::DocumentsInfoResponse response;
         response.collection_name = "documents"; // Default collection name
 
-        for (const auto& [id, info_opt] : document_infos)
+        for (const auto& doc_pair : document_infos)
         {
+            const auto& id = doc_pair.first;
+            const auto& info_opt = doc_pair.second;
             if (info_opt.has_value())
             {
                 kolosal::retrieval::DocumentInfo doc_info;

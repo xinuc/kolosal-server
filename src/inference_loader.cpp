@@ -36,8 +36,10 @@ namespace kolosal
                 // Create a copy to avoid iterator invalidation
                 auto engines_to_unload = loaded_engines_;
                 
-                for (const auto &[name, engine] : engines_to_unload)
+                for (const auto &engine_pair : engines_to_unload)
                 {
+                    const auto &name = engine_pair.first;
+                    const auto &engine = engine_pair.second;
                     try {
                         if (engine.handle) {
                             CLOSE_LIBRARY(engine.handle);
@@ -130,8 +132,10 @@ namespace kolosal
         std::vector<InferenceEngineInfo> engines;
         engines.reserve(available_engines_.size());
 
-        for (const auto &[name, info] : available_engines_)
+        for (const auto &engine_pair : available_engines_)
         {
+            const auto &name = engine_pair.first;
+            const auto &info = engine_pair.second;
             engines.push_back(info);
         }
 

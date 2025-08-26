@@ -24,8 +24,10 @@ nlohmann::json DocumentInfo::to_json() const
     j["text"] = text;
     j["metadata"] = nlohmann::json::object();
     
-    for (const auto& [key, value] : metadata)
+    for (const auto& metadata_pair : metadata)
     {
+        const auto& key = metadata_pair.first;
+        const auto& value = metadata_pair.second;
         j["metadata"][key] = value;
     }
     
