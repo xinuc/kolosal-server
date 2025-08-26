@@ -8,6 +8,7 @@
 #include <map>
 #include <cstring>
 #include <map>
+#include <chrono>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -55,6 +56,18 @@ inline std::string get_status_text(int status_code) {
 namespace kolosal {
 namespace http_internal {
     inline thread_local std::map<std::string, std::string> g_default_response_headers;
+    
+    // HTTP request tracking for metrics
+    struct RequestContext {
+        std::string method;
+        std::string path;
+        std::chrono::steady_clock::time_point start_time;
+        size_t request_size = 0;
+        int response_status = -1;  // -1 means not set yet
+        size_t response_size = 0;
+        bool metrics_enabled = false;
+    };
+    inline thread_local RequestContext g_request_context;
 
     inline void set_default_response_headers(const std::map<std::string, std::string>& headers) {
         g_default_response_headers = headers; // replace per request
@@ -63,8 +76,22 @@ namespace http_internal {
     inline void clear_default_response_headers() {
         g_default_response_headers.clear();
     }
+    
+    inline void set_request_context(const std::string& method, const std::string& path, 
+                                   size_t request_size, bool enable_metrics = true) {
+        g_request_context.method = method;
+        g_request_context.path = path;
+        g_request_context.request_size = request_size;
+        g_request_context.start_time = std::chrono::steady_clock::now();
+        g_request_context.metrics_enabled = enable_metrics;
+    }
+    
+    inline void clear_request_context() {
+        g_request_context = RequestContext{};
+    }
 }
 }
+
 
 // Regular response helper with support for custom headers
 inline KOLOSAL_SERVER_API void send_response(
@@ -95,6 +122,16 @@ inline KOLOSAL_SERVER_API void send_response(
     response << body;
 
     send(sock, response.str().c_str(), static_cast<int>(response.str().size()), 0);
+    
+    // Record HTTP metrics if context is set
+    // We track the response here since all routes use send_response
+    auto& ctx = kolosal::http_internal::g_request_context;
+    if (ctx.metrics_enabled && !ctx.method.empty()) {
+        // Store response info for later collection
+        ctx.response_status = status_code;
+        ctx.response_size = body.size();
+        // Note: Actual recording happens in server.cpp after route completes
+    }
 }
 
 // Function to start a streaming response with SSE support
@@ -102,6 +139,13 @@ inline KOLOSAL_SERVER_API void begin_streaming_response(
     SocketType sock,
     int status_code,
     const std::map<std::string, std::string>& headers = {}) {
+
+    // Track streaming response for metrics
+    auto& ctx = kolosal::http_internal::g_request_context;
+    if (ctx.metrics_enabled && !ctx.method.empty()) {
+        ctx.response_status = status_code;
+        // Note: response_size will be accumulated during streaming
+    }
 
     std::ostringstream headerStream;
     headerStream << "HTTP/1.1 " << status_code << " " << get_status_text(status_code) << "\r\n";
@@ -156,6 +200,12 @@ inline KOLOSAL_SERVER_API void begin_streaming_response(
 
 // Function to send a single stream chunk - modified to handle SSE format better
 inline KOLOSAL_SERVER_API void send_stream_chunk(SocketType sock, const StreamChunk& chunk) {
+    // Track chunk size for metrics
+    auto& ctx = kolosal::http_internal::g_request_context;
+    if (ctx.metrics_enabled && !chunk.data.empty()) {
+        ctx.response_size += chunk.data.size();
+    }
+    
     // Only send non-empty chunks
     if (!chunk.data.empty()) {
         // Format the chunk according to HTTP chunked encoding

@@ -25,6 +25,9 @@ namespace metrics {
     private:
         void write_metric_family(std::ostream& out, const MetricFamily& family) const;
         void write_labels(std::ostream& out, const std::map<std::string, std::string>& labels) const;
+        void write_histogram(std::ostream& out, const std::string& name, 
+                           const std::map<std::string, std::string>& labels,
+                           const Histogram& histogram) const;
         std::string escape_label_value(const std::string& value) const;
     };
 

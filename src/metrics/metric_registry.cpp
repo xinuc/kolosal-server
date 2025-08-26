@@ -16,6 +16,9 @@ namespace metrics {
             case MetricType::GAUGE:
                 metric = std::make_shared<Gauge>(name_, help_);
                 break;
+            case MetricType::HISTOGRAM:
+                metric = std::make_shared<Histogram>(name_, help_);
+                break;
             default:
                 throw std::runtime_error("Unsupported metric type");
         }

@@ -129,6 +129,8 @@ set(SOURCES
     src/metrics/formatters.cpp
     src/metrics/system_metrics.cpp
     src/metrics/llm_metrics.cpp
+    src/metrics/http_metrics.cpp
+    src/metrics/http_metrics_integration.cpp
     src/routes/config/auth_config_route.cpp    
     src/routes/server_logs_route.cpp    
     src/routes/retrieval/embedding_route.cpp

@@ -81,6 +81,10 @@ namespace metrics {
             return MetricRegistry::instance().create_family(name_, help_, MetricType::GAUGE);
         }
         
+        std::shared_ptr<MetricFamily> histogram() {
+            return MetricRegistry::instance().create_family(name_, help_, MetricType::HISTOGRAM);
+        }
+        
     private:
         std::string name_;
         std::string help_;

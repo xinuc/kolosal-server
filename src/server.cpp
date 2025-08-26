@@ -1,6 +1,7 @@
 #include "kolosal/server.hpp"
 #include "kolosal/utils.hpp"
 #include "kolosal/logger.hpp"
+#include "kolosal/metrics/http_metrics.hpp"
 #include <iostream>
 #include <cstring>
 #include <thread>
@@ -152,14 +153,46 @@ namespace kolosal
 		std::string body;
 		if (headerEnd != std::string::npos)
 			body = request.substr(headerEnd + 4);
+		
+		// Set request context for metrics tracking and start tracking
+		// Skip metrics endpoint itself to avoid self-measurement noise
+		bool skip_metrics = (path == "/metrics" || path == "/v1/metrics" || path == "/system-metrics");
+		printf("DEBUG: Setting context for %s %s, skip_metrics=%d\n", method.c_str(), path.c_str(), skip_metrics);
+		kolosal::http_internal::set_request_context(method, path, body.size(), !skip_metrics);
+		if (!skip_metrics) {
+			printf("DEBUG: Recording request start for %s %s\n", method.c_str(), path.c_str());
+			kolosal::metrics::HTTPMetricsCollector::instance().record_request_start(method, path);
+		}
 
 		bool routeFound = false;
+		int response_status = 200; // Default assume success
+		size_t response_size = 0; // Will be estimated
+		
 		for (const auto &route : routes)
 		{
 			if (route->match(method, path))
 			{
 				routeFound = true;
+				// Routes handle their own responses
 				route->handle(client_sock, body);
+				
+				// Record metrics using the actual response status captured in send_response
+				auto& ctx = kolosal::http_internal::g_request_context;
+				printf("DEBUG: Metrics check: enabled=%d, method=%s, path=%s, response_status=%d\n", 
+					ctx.metrics_enabled, method.c_str(), path.c_str(), ctx.response_status);
+				fflush(stdout);
+				if (ctx.metrics_enabled) {
+					// Use the actual response status if captured, otherwise default to 200
+					int actual_status = (ctx.response_status != -1) ? ctx.response_status : 200;
+					size_t actual_response_size = (ctx.response_size > 0) ? ctx.response_size : 0;
+					
+					ServerLogger::logDebug("Recording HTTP metrics for %s %s status=%d", 
+						method.c_str(), path.c_str(), actual_status);
+					kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+						method, path, actual_status, body.size(), actual_response_size,
+						ctx.start_time);
+					ctx.metrics_enabled = false;
+				}
 				break;
 			}
 		}
@@ -168,7 +201,19 @@ namespace kolosal
 		{
 			ServerLogger::logWarning("No route found for %s %s", method.c_str(), path.c_str());
 			send_response(client_sock, 404, "{\"error\":\"Not Found\"}");
+			// Metrics will be recorded using the context set by send_response
+			auto& ctx = kolosal::http_internal::g_request_context;
+			if (ctx.metrics_enabled && ctx.response_status != -1) {
+				ServerLogger::logDebug("Recording HTTP metrics for 404 %s %s", method.c_str(), path.c_str());
+				kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+					method, path, ctx.response_status, body.size(), ctx.response_size,
+					ctx.start_time);
+				ctx.metrics_enabled = false;
+			}
 		}
+		
+		// Clear request context after handling
+		kolosal::http_internal::clear_request_context();
 
 #ifdef _WIN32
 		closesocket(client_sock);
@@ -506,6 +551,15 @@ namespace kolosal
 
 								ServerLogger::logWarning("[Thread %d] Request blocked: %s",
 														 std::this_thread::get_id(), authResult.reason.c_str());
+								
+								// Record metrics for auth failure (no body yet, so size is 0)
+								bool skip_metrics = (path == "/metrics" || path == "/v1/metrics" || path == "/system-metrics");
+								if (!skip_metrics) {
+									auto start_time = std::chrono::steady_clock::now();
+									kolosal::metrics::HTTPMetricsCollector::instance().record_request_start(method, path);
+									kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+										method, path, authResult.statusCode, 0, jError.dump().size(), start_time);
+								}
 
 #ifdef _WIN32
 								closesocket(client_sock);
@@ -519,8 +573,18 @@ namespace kolosal
 							// Handle CORS preflight requests
 							if (authResult.isPreflight)
 							{
-								send_response(client_sock, authResult.statusCode, "", responseHeaders);								ServerLogger::logDebug("[Thread %d] CORS preflight request handled",
+								send_response(client_sock, authResult.statusCode, "", responseHeaders);
+								ServerLogger::logDebug("[Thread %d] CORS preflight request handled",
 													  std::this_thread::get_id());
+								
+								// Record metrics for preflight (no body yet, so size is 0)
+								bool skip_metrics = (path == "/metrics" || path == "/v1/metrics" || path == "/system-metrics");
+								if (!skip_metrics) {
+									auto start_time = std::chrono::steady_clock::now();
+									kolosal::metrics::HTTPMetricsCollector::instance().record_request_start(method, path);
+									kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+										method, path, authResult.statusCode, 0, 0, start_time);
+								}
 
 #ifdef _WIN32
 								closesocket(client_sock);
@@ -582,7 +646,17 @@ namespace kolosal
 									ServerLogger::logDebug("[Thread %d] Read %d additional bytes for body",
 														   std::this_thread::get_id(), totalRead);
 								}
-							} // Route the request
+							} 
+							
+							// Set request context for metrics tracking (must be done in worker thread after body is read!)
+							// Skip metrics endpoint itself to avoid self-measurement noise
+							bool skip_metrics = (path == "/metrics" || path == "/v1/metrics" || path == "/system-metrics");
+							kolosal::http_internal::set_request_context(method, path, body.size(), !skip_metrics);
+							if (!skip_metrics) {
+								kolosal::metrics::HTTPMetricsCollector::instance().record_request_start(method, path);
+							}
+							
+							// Route the request
 							bool routeFound = false;
 							for (auto &route : routes)
 							{
@@ -604,6 +678,15 @@ namespace kolosal
 										nlohmann::json jError = {{"error", {{"message", std::string("Internal error: ") + ex.what()}, {"type", "server_error"}, {"param", nullptr}, {"code", nullptr}}}};
 										send_response(client_sock, 500, jError.dump(), responseHeaders);
 									}
+									
+									// Record metrics after route completes
+									auto& ctx = kolosal::http_internal::g_request_context;
+									if (ctx.metrics_enabled && ctx.response_status != -1) {
+										kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+											method, path, ctx.response_status, body.size(), ctx.response_size,
+											ctx.start_time);
+										ctx.metrics_enabled = false;
+									}
 									break;
 								}
 							}
@@ -615,11 +698,23 @@ namespace kolosal
 
 								nlohmann::json jError = {{"error", {{"message", "Not found"}, {"type", "invalid_request_error"}, {"param", nullptr}, {"code", nullptr}}}};
 								send_response(client_sock, 404, jError.dump(), responseHeaders);
+								
+								// Record metrics for 404 response
+								auto& ctx = kolosal::http_internal::g_request_context;
+								if (ctx.metrics_enabled && ctx.response_status != -1) {
+									kolosal::metrics::HTTPMetricsCollector::instance().record_request_complete(
+										method, path, ctx.response_status, body.size(), ctx.response_size,
+										ctx.start_time);
+									ctx.metrics_enabled = false;
+								}
 							}							
 							
 							ServerLogger::logDebug("[Thread %d] Completed request for %s",
 							std::this_thread::get_id(), path.c_str());
 
+							// Clear request context after handling
+							kolosal::http_internal::clear_request_context();
+							
 #ifdef _WIN32
 							closesocket(client_sock);
 #else

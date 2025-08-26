@@ -15,9 +15,8 @@ namespace metrics {
     }
 
     void PrometheusFormatter::write_metric_family(std::ostream& out, const MetricFamily& family) const {
-        if (family.metrics().empty()) {
-            return;
-        }
+        // Always show metric families even if empty - this is proper Prometheus behavior
+        // Empty metrics should show with a comment but no data lines
         
         // Write HELP comment
         out << "# HELP " << family.name() << " " << family.help() << "\n";
@@ -40,18 +39,28 @@ namespace metrics {
         }
         out << "\n";
         
-        // Write metrics
-        for (const auto& labeled_metric : family.metrics()) {
-            out << family.name();
-            
-            // Write labels if they exist
-            const auto& labels = labeled_metric.labels();
-            if (!labels.empty()) {
-                write_labels(out, labels);
+        // Write metrics based on type
+        if (family.type() == MetricType::HISTOGRAM) {
+            // Special handling for histograms
+            for (const auto& labeled_metric : family.metrics()) {
+                if (auto* histogram = dynamic_cast<Histogram*>(labeled_metric.metric().get())) {
+                    write_histogram(out, family.name(), labeled_metric.labels(), *histogram);
+                }
             }
-            
-            // Write value
-            out << " " << labeled_metric.metric()->get() << "\n";
+        } else {
+            // Regular metrics (counter, gauge)
+            for (const auto& labeled_metric : family.metrics()) {
+                out << family.name();
+                
+                // Write labels if they exist
+                const auto& labels = labeled_metric.labels();
+                if (!labels.empty()) {
+                    write_labels(out, labels);
+                }
+                
+                // Write value
+                out << " " << labeled_metric.metric()->get() << "\n";
+            }
         }
     }
 
@@ -70,6 +79,46 @@ namespace metrics {
             first = false;
         }
         out << "}";
+    }
+
+    void PrometheusFormatter::write_histogram(std::ostream& out, const std::string& name,
+                                             const std::map<std::string, std::string>& labels,
+                                             const Histogram& histogram) const {
+        // Write bucket metrics
+        const auto& buckets = histogram.buckets();
+        const auto& bucket_counts = histogram.bucket_counts();
+        
+        for (size_t i = 0; i < buckets.size(); ++i) {
+            out << name << "_bucket";
+            
+            // Add labels including the le (less than or equal) label
+            auto bucket_labels = labels;
+            bucket_labels["le"] = std::to_string(buckets[i]);
+            write_labels(out, bucket_labels);
+            
+            out << " " << bucket_counts[i] << "\n";
+        }
+        
+        // Write +Inf bucket
+        out << name << "_bucket";
+        auto inf_labels = labels;
+        inf_labels["le"] = "+Inf";
+        write_labels(out, inf_labels);
+        out << " " << bucket_counts.back() << "\n";
+        
+        // Write sum
+        out << name << "_sum";
+        if (!labels.empty()) {
+            write_labels(out, labels);
+        }
+        out << " " << histogram.sum() << "\n";
+        
+        // Write count
+        out << name << "_count";
+        if (!labels.empty()) {
+            write_labels(out, labels);
+        }
+        out << " " << histogram.count() << "\n";
     }
 
     std::string PrometheusFormatter::escape_label_value(const std::string& value) const {

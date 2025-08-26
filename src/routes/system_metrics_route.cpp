@@ -5,6 +5,7 @@
 #include "kolosal/logger.hpp"
 #include "kolosal/metrics/system_metrics.hpp"
 #include "kolosal/metrics/llm_metrics.hpp"
+#include "kolosal/metrics/http_metrics.hpp"
 #include "kolosal/metrics/formatters.hpp"
 #include <json.hpp>
 #include <thread>
@@ -58,6 +59,12 @@ namespace kolosal
             // Initialize LLM metrics (singleton - only creates metrics once)
             auto& llm_metrics = metrics::LLMMetrics::instance().collector();
             // LLM metrics are updated during request processing
+            
+            // Initialize HTTP metrics (singleton - only creates metrics once)
+            static std::once_flag http_metrics_flag;
+            std::call_once(http_metrics_flag, []() {
+                metrics::HTTPMetricsCollector::instance().register_metrics();
+            });
             
             // Add engine metrics (but prevent duplication)
             static std::once_flag engine_metrics_flag;
