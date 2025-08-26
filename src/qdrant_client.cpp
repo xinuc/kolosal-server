@@ -196,8 +196,10 @@ public:
         
         // Set headers
         struct curl_slist* headers = nullptr;
-        for (const auto& [key, value] : request->headers)
+        for (const auto& header_pair : request->headers)
         {
+            const auto& key = header_pair.first;
+            const auto& value = header_pair.second;
             std::string header = key + ": " + value;
             headers = curl_slist_append(headers, header.c_str());
         }
