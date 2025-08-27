@@ -1,18 +1,46 @@
+# CMake build artifacts
 CMakeLists.txt.user
 CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
+CMakeFiles/
+CMakeScripts/
+Testing/
 Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
-_deps
+_deps/
 CMakeUserPresets.json
+*.cmake
+*.pc
+DartConfiguration.tcl
+**/CMakeFiles/
+**/Makefile
+**/cmake_install.cmake
+**/*-config.cmake
+**/*-config-version.cmake
+**/*-targets.cmake
+**/build-info.cpp
+
+# IDE
 .vs/
+.vscode
 out/
+
+# Build directories
 build/
+build*/
+bin/
+Release/
+Debug/
+
+# Project specific
 models/**
 downloads/**
-build*/**
+endpoint_test_results/
+tools/
+inference/llama-cpp-build/
+
+# External library generated configs
+external/*/src/**/*_config.h
+external/**/*.pc

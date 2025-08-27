@@ -2,11 +2,7 @@
 
 #include "../route_interface.hpp"
 #include "../../export.hpp"
-#include "../../retrieval/document_service.hpp"
 #include <string>
-#include <memory>
-#include <atomic>
-#include <mutex>
 
 namespace kolosal
 {
@@ -104,15 +100,6 @@ private:
                           const std::string& error_type = "invalid_request_error", 
                           const std::string& param = "");
 
-    /**
-     * @brief Initializes the document service if needed
-     * @return true if service is ready, false otherwise
-     */
-    bool ensureDocumentService();
-
-    static std::atomic<long long> request_counter_;
-    std::unique_ptr<kolosal::retrieval::DocumentService> document_service_;
-    std::mutex service_mutex_;
     std::string current_endpoint_;
     std::string current_method_;
 };

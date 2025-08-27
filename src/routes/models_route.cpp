@@ -1,26 +1,11 @@
 #include "kolosal/routes/models_route.hpp"
+#include "kolosal/controllers/models_controller.hpp"
 #include "kolosal/utils.hpp"
 #include "kolosal/server_api.hpp"
 #include "kolosal/node_manager.h"
 #include "kolosal/logger.hpp"
-#include "kolosal/server_config.hpp"
-#include "kolosal/models/add_model_request_model.hpp"
-#include "kolosal/models/add_model_response_model.hpp"
-#include "kolosal/models/model_status_request_model.hpp"
-#include "kolosal/models/model_status_response_model.hpp"
-#include "kolosal/models/remove_model_request_model.hpp"
-#include "kolosal/models/remove_model_response_model.hpp"
-#include "kolosal/download_utils.hpp"
-#include "kolosal/download_manager.hpp"
-#include "inference_interface.h"
-#include "llama.h" 
 #include <json.hpp>
-#include <iostream>
 #include <thread>
-#include <filesystem>
-#include <vector>
-#include <string>
-#include <chrono>
 
 using json = nlohmann::json;
 
@@ -75,21 +60,32 @@ namespace kolosal
             ServerLogger::logDebug("[Thread %u] Received %s request for path: %s", 
                                    std::this_thread::get_id(), matched_method_.c_str(), matched_path_.c_str());
 
-            // Route to appropriate handler based on stored method and path
+            // Dependency Injection - Get dependencies
+            auto &nodeManager = ServerAPI::instance().getNodeManager();
+            
+            // Single Responsibility - Controller handles business logic
+            controllers::ModelsController controller(&nodeManager);
+            
+            // Route based on path pattern
+            controllers::BaseController::Response response;
+            
             if (std::regex_match(matched_path_, modelsPattern_))
             {
                 if (matched_method_ == "GET")
                 {
-                    handleListModels(sock, body);
+                    // Determine if OpenAI format based on path
+                    bool openai_format = matched_path_.find("/v1/") != std::string::npos;
+                    response = controller.listModels(openai_format);
                 }
                 else if (matched_method_ == "POST")
                 {
-                    handleAddModel(sock, body);
+                    response = controller.addModel(body);
                 }
                 else
                 {
-                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}, {"param", nullptr}, {"code", nullptr}}}};
+                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}}}};
                     send_response(sock, 405, jError.dump());
+                    return;
                 }
             }
             else if (std::regex_match(matched_path_, modelStatusPattern_))
@@ -97,12 +93,13 @@ namespace kolosal
                 if (matched_method_ == "GET")
                 {
                     std::string modelId = extractModelIdFromPath(matched_path_);
-                    handleModelStatus(sock, body, modelId);
+                    response = controller.getModelStatus(modelId);
                 }
                 else
                 {
-                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}, {"param", nullptr}, {"code", nullptr}}}};
+                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}}}};
                     send_response(sock, 405, jError.dump());
+                    return;
                 }
             }
             else if (std::regex_match(matched_path_, modelIdPattern_))
@@ -111,29 +108,54 @@ namespace kolosal
                 
                 if (matched_method_ == "GET")
                 {
-                    handleGetModel(sock, body, modelId);
+                    response = controller.getModel(modelId);
                 }
                 else if (matched_method_ == "DELETE")
                 {
-                    handleRemoveModel(sock, body, modelId);
+                    response = controller.removeModel(modelId);
                 }
                 else
                 {
-                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}, {"param", nullptr}, {"code", nullptr}}}};
+                    json jError = {{"error", {{"message", "Method not allowed"}, {"type", "method_not_allowed"}}}};
                     send_response(sock, 405, jError.dump());
+                    return;
                 }
             }
             else
             {
-                json jError = {{"error", {{"message", "Not found"}, {"type", "not_found"}, {"param", nullptr}, {"code", nullptr}}}};
+                json jError = {{"error", {{"message", "Not found"}, {"type", "not_found"}}}};
                 send_response(sock, 404, jError.dump());
+                return;
             }
+            
+            // Add CORS headers
+            response.headers["Access-Control-Allow-Origin"] = "*";
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS";
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key";
+            
+            // Send response
+            send_response(sock, response.status_code, response.body.dump(), response.headers);
         }
         catch (const std::exception &ex)
         {
             ServerLogger::logError("[Thread %u] Error in ModelsRoute: %s", std::this_thread::get_id(), ex.what());
-            json jError = {{"error", {{"message", std::string("Server error: ") + ex.what()}, {"type", "server_error"}, {"param", nullptr}, {"code", nullptr}}}};
-            send_response(sock, 500, jError.dump());
+            
+            // Error handling - consistent format
+            json errorResponse = {
+                {"error", {
+                    {"message", std::string("Server error: ") + ex.what()},
+                    {"type", "server_error"}
+                }}
+            };
+
+            std::map<std::string, std::string> headers = {
+                {"Content-Type", "application/json"},
+                {"Access-Control-Allow-Origin", "*"},
+                {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
+                {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key"}
+            };
+
+            send_response(sock, 500, errorResponse.dump(), headers);
         }
     }
 
