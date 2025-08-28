@@ -1,24 +1,17 @@
 #include "kolosal/routes/llm/oai_completions_route.hpp"
+#include "kolosal/controllers/chat_completion_controller.hpp"
 #include "kolosal/utils.hpp"
+#include "kolosal/server_api.hpp"
+#include "kolosal/node_manager.h"
+#include "kolosal/logger.hpp"
 #include "kolosal/models/chat_response_model.hpp"
 #include "kolosal/models/chat_response_chunk_model.hpp"
 #include "kolosal/models/completion_request_model.hpp"
 #include "kolosal/models/completion_response_model.hpp"
 #include "kolosal/models/completion_response_chunk_model.hpp"
-#include "kolosal/server_api.hpp"
-#include "kolosal/logger.hpp"
-#include "kolosal/node_manager.h"
-
 #include "inference_interface.h"
 #include <json.hpp>
-#include <iostream>
-#include <stdexcept>
-#include <sstream>
-#include <vector>
 #include <thread>
-#include <chrono>
-#include <mutex>
-#include <memory>
 #include <variant>
 
 using json = nlohmann::json;
@@ -161,6 +154,12 @@ namespace kolosal
     {
         try
         {
+            // Dependency Injection - Get dependencies
+            auto &nodeManager = ServerAPI::instance().getNodeManager();
+            
+            // Single Responsibility - Controller handles business logic
+            controllers::ChatCompletionController controller(&nodeManager);
+            
             // Check for empty body
             if (body.empty())
             {
@@ -169,32 +168,61 @@ namespace kolosal
 
             auto j = json::parse(body);
             
-            // Determine the type of request based on the endpoint path
-            // We need to get the path from the request context, but since it's not available in handle(),
-            // we'll determine it based on the presence of 'messages' field in the JSON
+            // Check if streaming is requested
+            bool isStreaming = j.contains("stream") && j["stream"].is_boolean() && j["stream"].get<bool>();
+            
+            controllers::BaseController::Response response;
+            
+            if (isStreaming)
+            {
+                // For streaming, use the existing implementation for now
+                if (j.contains("messages"))
+                {
+                    handleChatCompletion(sock, body);
+                }
+                else if (j.contains("prompt"))
+                {
+                    handleTextCompletion(sock, body);
+                }
+                else
+                {
+                    throw std::invalid_argument("Invalid request: missing 'messages' or 'prompt' field");
+                }
+                return;
+            }
+            
+            // For non-streaming, use the controller
             if (j.contains("messages"))
             {
-                handleChatCompletion(sock, body);
+                response = controller.processChatCompletion(body);
             }
             else if (j.contains("prompt"))
             {
-                handleTextCompletion(sock, body);
+                response = controller.processCompletion(body);
             }
             else
             {
                 throw std::invalid_argument("Invalid request: missing 'messages' or 'prompt' field");
             }
+            
+            // Add CORS headers
+            response.headers["Access-Control-Allow-Origin"] = "*";
+            response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key";
+            
+            // Send response
+            send_response(sock, response.status_code, response.body.dump(), response.headers);
         }
         catch (const json::parse_error &ex)
         {
             ServerLogger::logError("JSON parsing error: %s", ex.what());
-            json jError = {{"error", {{"message", std::string("Invalid JSON: ") + ex.what()}, {"type", "invalid_request_error"}, {"param", nullptr}, {"code", nullptr}}}};
+            json jError = {{"error", {{"message", std::string("Invalid JSON: ") + ex.what()}, {"type", "invalid_request_error"}}}};
             send_response(sock, 400, jError.dump());
         }
         catch (const std::exception &ex)
         {
             ServerLogger::logError("Error handling completion request: %s", ex.what());
-            json jError = {{"error", {{"message", std::string("Error: ") + ex.what()}, {"type", "invalid_request_error"}, {"param", nullptr}, {"code", nullptr}}}};
+            json jError = {{"error", {{"message", std::string("Error: ") + ex.what()}, {"type", "invalid_request_error"}}}};
             send_response(sock, 400, jError.dump());
         }
     }

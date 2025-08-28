@@ -119,6 +119,20 @@ set(SOURCES
     src/inference_loader.cpp
     src/inference_interface_impl.cpp
     src/gpu_detection.cpp
+    src/controllers/health_controller.cpp
+    src/controllers/models_controller.cpp
+    src/controllers/completion_controller.cpp
+    src/controllers/embedding_controller.cpp
+    src/controllers/engines_controller.cpp
+    src/controllers/chat_completion_controller.cpp
+    src/controllers/documents_controller.cpp
+    src/controllers/parse_document_controller.cpp
+    src/controllers/chunking_controller.cpp
+    src/controllers/internet_search_controller.cpp
+    src/controllers/server_logs_controller.cpp
+    src/controllers/auth_config_controller.cpp
+    src/controllers/downloads_controller.cpp
+    src/controllers/controller_utils.cpp
     src/routes/llm/oai_completions_route.cpp
     src/routes/llm/completion_route.cpp
     src/routes/models_route.cpp
@@ -521,4 +535,11 @@ if(INSTALL_HEADERS)
         DESTINATION include
         FILES_MATCHING PATTERN "*.hpp"
     )
+endif()
+
+# === TESTING ===
+option(BUILD_TESTS "Build API compatibility tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

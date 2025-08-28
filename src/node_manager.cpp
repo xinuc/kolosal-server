@@ -1230,8 +1230,10 @@ namespace kolosal
             {
                 std::shared_lock<std::shared_mutex> mapLock(engineMapMutex_);
                 engineSnapshot.reserve(engines_.size());
-                for (const auto &[id, recordPtr] : engines_)
+                for (const auto &engine_pair : engines_)
                 {
+                    const auto &id = engine_pair.first;
+                    const auto &recordPtr = engine_pair.second;
                     if (recordPtr && !recordPtr->markedForRemoval.load())
                     {
                         engineSnapshot.emplace_back(id, recordPtr);
@@ -1243,8 +1245,10 @@ namespace kolosal
             auto nextCheckTime = std::chrono::steady_clock::now() + std::chrono::seconds(60); // Default to 60 seconds
             bool hasLoadedEngines = false;
 
-            for (const auto &[engineId, recordPtr] : engineSnapshot)
+            for (const auto &snapshot_pair : engineSnapshot)
             {
+                const auto &engineId = snapshot_pair.first;
+                const auto &recordPtr = snapshot_pair.second;
                 if (recordPtr->markedForRemoval.load())
                     continue;
 

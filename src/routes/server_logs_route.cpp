@@ -1,12 +1,9 @@
 #include "kolosal/routes/server_logs_route.hpp"
+#include "kolosal/controllers/server_logs_controller.hpp"
 #include "kolosal/utils.hpp"
 #include "kolosal/logger.hpp"
 #include <json.hpp>
-#include <iostream>
 #include <thread>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
 
 using json = nlohmann::json;
 
@@ -24,57 +21,17 @@ namespace kolosal
         {
             ServerLogger::logDebug("[Thread %u] Received server logs request", std::this_thread::get_id());
 
-            // Get the ServerLogger instance and retrieve logs
-            auto &logger = ServerLogger::instance();
-            const auto &logs = logger.getLogs();
-
-            json logsList = json::array();
-            for (const auto &logEntry : logs)
-            {
-                std::string levelStr;
-                switch (logEntry.level)
-                {
-                case LogLevel::SERVER_ERROR:
-                    levelStr = "ERROR";
-                    break;
-                case LogLevel::SERVER_WARNING:
-                    levelStr = "WARNING";
-                    break;
-                case LogLevel::SERVER_INFO:
-                    levelStr = "INFO";
-                    break;
-                case LogLevel::SERVER_DEBUG:
-                    levelStr = "DEBUG";
-                    break;
-                default:
-                    levelStr = "UNKNOWN";
-                    break;
-                }
-
-                json logObject = {
-                    {"level", levelStr},
-                    {"timestamp", logEntry.timestamp},
-                    {"message", logEntry.message}
-                };
-
-                logsList.push_back(logObject);
-            }
-
-            // Get current timestamp for the response
-            auto now = std::chrono::system_clock::now();
-            auto time_t = std::chrono::system_clock::to_time_t(now);
-            std::stringstream ss;
-            ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
-            std::string currentTimestamp = ss.str();
-
-            json response = {
-                {"logs", logsList},
-                {"total_count", logsList.size()},
-                {"retrieved_at", currentTimestamp}
-            };
-
-            send_response(sock, 200, response.dump());
-            ServerLogger::logDebug("[Thread %u] Successfully retrieved %zu log entries", std::this_thread::get_id(), logsList.size());
+            // Create controller and get logs
+            controllers::ServerLogsController controller;
+            auto response = controller.getLogs();
+            
+            // Add CORS headers
+            std::map<std::string, std::string> headers = response.headers;
+            headers["Access-Control-Allow-Origin"] = "*";
+            headers["Access-Control-Allow-Methods"] = "GET, OPTIONS";
+            headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key";
+            
+            send_response(sock, response.status_code, response.body.dump(), headers);
         }
         catch (const std::exception &ex)
         {
@@ -89,7 +46,12 @@ namespace kolosal
                 }}
             };
 
-            send_response(sock, 500, jError.dump());
+            std::map<std::string, std::string> headers = {
+                {"Content-Type", "application/json"},
+                {"Access-Control-Allow-Origin", "*"}
+            };
+            
+            send_response(sock, 500, jError.dump(), headers);
         }
     }
 

@@ -116,11 +116,8 @@ std::vector<std::string> getLocalIPAddresses()
     return addresses;
 }
 
-// Function to get public IP address using external services
 std::string getPublicIPAddress()
 {
-    // We'll use a simple HTTP request to get the public IP
-    // This is a basic implementation - in production you might want to use multiple services as fallback
 #ifdef _WIN32
     HINTERNET hInternet = InternetOpenA("KolosalServer/1.0", INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
     if (!hInternet)
@@ -158,8 +155,6 @@ std::string getPublicIPAddress()
         }
     }
 #else
-    // For Linux/Mac, we can use curl or similar
-    // This is a simplified implementation
     FILE *pipe = popen("curl -s http://httpbin.org/ip | grep -o '\"origin\": \"[^\"]*' | cut -d'\"' -f4", "r");
     if (pipe)
     {
@@ -183,12 +178,8 @@ std::string getPublicIPAddress()
     return "";
 }
 
-// Function to attempt UPnP port forwarding
 bool configureUPnPPortForwarding(const std::string &port)
 {
-    // This is a simplified UPnP implementation
-    // In a production environment, you'd want to use a proper UPnP library
-
     std::cout << "\nAttempting to configure UPnP port forwarding for port " << port << "..." << std::endl;
 
 #ifdef _WIN32
@@ -214,7 +205,6 @@ bool configureUPnPPortForwarding(const std::string &port)
 #endif
 }
 
-// Signal handler for graceful shutdown
 void signal_handler(int signal)
 {
     std::cout << "\nReceived signal " << signal << ", shutting down gracefully..." << std::endl;

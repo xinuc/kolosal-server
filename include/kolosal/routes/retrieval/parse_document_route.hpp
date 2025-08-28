@@ -30,9 +30,6 @@ namespace kolosal
         std::string getDataKey(DocumentType type);
         std::string getLogPrefix(DocumentType type);
         void sendJsonResponse(SocketType sock, const nlohmann::json &response, int status_code = 200);
-        bool parseRequest(const std::string &body, nlohmann::json &request, SocketType sock);
-        bool validateDocumentData(const nlohmann::json &request, const std::string &data_key, SocketType sock);
-        std::vector<unsigned char> decodeBase64Data(const std::string &base64_data, SocketType sock);
         void sendOptionsResponse(SocketType sock, const std::string &endpoint_name, const std::string &description);
     };
 

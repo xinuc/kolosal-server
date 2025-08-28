@@ -1,695 +1,183 @@
 #include "kolosal/routes/llm/completion_route.hpp"
+#include "kolosal/controllers/completion_controller.hpp"
+#include "kolosal/controllers/chat_completion_controller.hpp"
 #include "kolosal/utils.hpp"
-#include "kolosal/server_api.hpp"
 #include "kolosal/logger.hpp"
-#include "kolosal/node_manager.h"
-
-#include "inference_interface.h"
 #include <json.hpp>
-#include <iostream>
-#include <stdexcept>
-#include <sstream>
-#include <vector>
+#include <map>
 #include <thread>
-#include <chrono>
-#include <mutex>
-#include <memory>
 
 using json = nlohmann::json;
 
-namespace kolosal
-{
-    namespace
-    {
-        // Helper: finalize precedence between grammar & jsonSchema and log choice
-        template <typename P>
-        void finalizeStructuredOutput(P &params, const char *context) {
-            // Precedence: explicit grammar overrides jsonSchema-derived grammar
-            if (!params.grammar.empty()) {
-                if (!params.jsonSchema.empty()) {
-                    ServerLogger::logInfo("[%s] Both grammar & jsonSchema provided; grammar takes precedence", context);
-                    // Keep jsonSchema string for potential future reference but engine will ignore because grammar set
-                } else {
-                    ServerLogger::logInfo("[%s] Using provided grammar (chars=%zu)", context, params.grammar.size());
-                }
-            } else if (!params.jsonSchema.empty()) {
-                ServerLogger::logInfo("[%s] Using provided JSON schema (chars=%zu)", context, params.jsonSchema.size());
-            }
+namespace kolosal {
+
+CompletionRoute::CompletionRoute() = default;
+
+CompletionRoute::~CompletionRoute() = default;
+
+bool CompletionRoute::match(const std::string& method, const std::string& path) {
+    return (method == "POST" && 
+            (path == "/v1/inference/completions" || 
+             path == "/inference/completions" ||
+             path == "/v1/inference/chat/completions" || 
+             path == "/inference/chat/completions"));
+}
+
+void CompletionRoute::handle(SocketType sock, const std::string& body) {
+    try {
+        // Check for empty body
+        if (body.empty()) {
+            json error = {
+                {"error", {
+                    {"message", "Request body is empty"},
+                    {"type", "invalid_request_error"}
+                }}
+            };
+            send_response(sock, 400, error.dump());
+            return;
         }
-        /**
-         * @brief Parses ChatCompletionParameters from JSON request
-         */
-        ChatCompletionParameters parseChatCompletionParameters(const json& j)
-        {
-            ChatCompletionParameters params;
+
+        auto j = json::parse(body);
+        
+        // Check if streaming is requested
+        bool isStreaming = j.value("streaming", false);
+        
+        // Determine which type of request (chat or text completion)
+        bool isChatCompletion = j.contains("messages");
+        bool isTextCompletion = j.contains("prompt");
+        
+        if (!isChatCompletion && !isTextCompletion) {
+            json error = {
+                {"error", {
+                    {"message", "Invalid request: missing 'messages' or 'prompt' field"},
+                    {"type", "invalid_request_error"}
+                }}
+            };
+            send_response(sock, 400, error.dump());
+            return;
+        }
+        
+        // Extract model name for logging
+        std::string modelName = j.value("model", "unknown");
+        
+        if (isStreaming) {
+            // Handle streaming response
+            ServerLogger::logInfo("[Thread %u] Processing streaming inference %s request for model '%s'",
+                                  std::this_thread::get_id(), 
+                                  isChatCompletion ? "chat completion" : "completion",
+                                  modelName.c_str());
             
-            // Required field: messages
-            if (j.contains("messages") && j["messages"].is_array()) {
-                for (const auto& msgJson : j["messages"]) {
-                    if (msgJson.contains("role") && msgJson.contains("content") &&
-                        msgJson["role"].is_string() && msgJson["content"].is_string()) {
-                        
-                        Message msg(msgJson["role"].get<std::string>(), 
-                                   msgJson["content"].get<std::string>());
-                        params.messages.push_back(msg);
-                    } else {
-                        throw std::invalid_argument("Invalid message format in messages array");
-                    }
+            // Start the streaming response with proper SSE headers
+            begin_streaming_response(sock, 200, {
+                {"Content-Type", "text/event-stream"},
+                {"Cache-Control", "no-cache"},
+                {"Access-Control-Allow-Origin", "*"},
+                {"Access-Control-Allow-Methods", "POST, OPTIONS"},
+                {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With"}
+            });
+            
+            bool streamCompleted = false;
+            std::string lastError;
+            
+            // Create streaming callback
+            auto streamingCallback = [sock, &streamCompleted](const std::string& data) {
+                if (!data.empty()) {
+                    // The controller already formats as SSE data
+                    send_stream_chunk(sock, StreamChunk(data, false));
                 }
+            };
+            
+            // Process with streaming
+            controllers::BaseController::Response response;
+            if (isChatCompletion) {
+                controllers::ChatCompletionController controller;
+                response = controller.processChatCompletion(body, streamingCallback);
             } else {
-                throw std::invalid_argument("Missing or invalid 'messages' field");
+                controllers::CompletionController controller;
+                response = controller.processCompletion(body, streamingCallback);
             }
             
-            // Optional fields with defaults
-            if (j.contains("randomSeed") && j["randomSeed"].is_number_integer()) {
-                params.randomSeed = j["randomSeed"].get<int>();
+            // Check if there was an error during streaming
+            if (response.status_code != 200) {
+                // Send error as final chunk if not already sent
+                json errorResponse;
+                errorResponse["error"] = response.body.value("error", "Unknown error");
+                errorResponse["text"] = "";
+                errorResponse["tokens"] = json::array();
+                errorResponse["tps"] = 0.0f;
+                errorResponse["ttft"] = 0.0f;
+                
+                std::string sseData = "data: " + errorResponse.dump() + "\n\n";
+                send_stream_chunk(sock, StreamChunk(sseData, false));
             }
             
-            if (j.contains("maxNewTokens") && j["maxNewTokens"].is_number_integer()) {
-                params.maxNewTokens = j["maxNewTokens"].get<int>();
-            }
+            // Terminate the stream (empty chunk with terminate flag)
+            send_stream_chunk(sock, StreamChunk("", true));
             
-            if (j.contains("minLength") && j["minLength"].is_number_integer()) {
-                params.minLength = j["minLength"].get<int>();
-            }
+            ServerLogger::logInfo("[Thread %u] Completed streaming response for model '%s'",
+                                  std::this_thread::get_id(), modelName.c_str());
             
-            if (j.contains("temperature") && j["temperature"].is_number()) {
-                params.temperature = j["temperature"].get<float>();
-            }
+        } else {
+            // Handle non-streaming response
+            ServerLogger::logInfo("[Thread %u] Processing non-streaming inference %s request for model '%s'",
+                                  std::this_thread::get_id(),
+                                  isChatCompletion ? "chat completion" : "completion",
+                                  modelName.c_str());
             
-            if (j.contains("topP") && j["topP"].is_number()) {
-                params.topP = j["topP"].get<float>();
-            }
+            controllers::BaseController::Response response;
             
-            if (j.contains("streaming") && j["streaming"].is_boolean()) {
-                params.streaming = j["streaming"].get<bool>();
-            }
-            
-            if (j.contains("kvCacheFilePath") && j["kvCacheFilePath"].is_string()) {
-                params.kvCacheFilePath = j["kvCacheFilePath"].get<std::string>();
-            }
-            
-            if (j.contains("seqId") && j["seqId"].is_number_integer()) {
-                params.seqId = j["seqId"].get<int>();
-            }
-            
-            if (j.contains("tools") && j["tools"].is_string()) {
-                params.tools = j["tools"].get<std::string>();
-            }
-            
-            if (j.contains("toolChoice") && j["toolChoice"].is_string()) {
-                params.toolChoice = j["toolChoice"].get<std::string>();
-            }
-
-            // Grammar and JSON schema support
-            if (j.contains("grammar") && j["grammar"].is_string()) {
-                params.grammar = j["grammar"].get<std::string>();
-            }
-
-            // Accept both "jsonSchema" and OpenAI-style "response_format"
-            if (j.contains("jsonSchema")) {
-                if (j["jsonSchema"].is_string()) {
-                    params.jsonSchema = j["jsonSchema"].get<std::string>();
-                } else if (j["jsonSchema"].is_object()) {
-                    params.jsonSchema = j["jsonSchema"].dump();
-                }
-            }
-
-            // Map OpenAI response_format to jsonSchema when provided
-            if (j.contains("response_format") && j["response_format"].is_object()) {
-                const auto &rf = j["response_format"];
-                if (rf.contains("type") && rf["type"].is_string()) {
-                    const std::string type = rf["type"].get<std::string>();
-                    if (type == "json_object") {
-                        // Enforce generic JSON object
-                        params.jsonSchema = std::string("{") + "\"type\":\"object\"}";
-                    } else if (type == "json_schema") {
-                        // Support OpenAI style where schema can be nested under json_schema.schema
-                        if (rf.contains("json_schema")) {
-                            const auto &js = rf["json_schema"];
-                            if (js.is_object()) {
-                                if (js.contains("schema") && js["schema"].is_object()) {
-                                    params.jsonSchema = js["schema"].dump();
-                                } else {
-                                    params.jsonSchema = js.dump();
-                                }
-                            } else if (js.is_string()) {
-                                params.jsonSchema = js.get<std::string>();
-                            }
-                        }
-                    }
-                }
-            }
-            
-            finalizeStructuredOutput(params, "chat");
-            return params;
-        }
-
-        /**
-         * @brief Parses CompletionParameters from JSON request
-         */
-        CompletionParameters parseCompletionParameters(const json& j)
-        {
-            CompletionParameters params;
-            
-            // Required field
-            if (j.contains("prompt") && j["prompt"].is_string()) {
-                params.prompt = j["prompt"].get<std::string>();
+            if (isChatCompletion) {
+                controllers::ChatCompletionController controller;
+                response = controller.processChatCompletion(body);
             } else {
-                throw std::invalid_argument("Missing or invalid 'prompt' field");
+                controllers::CompletionController controller;
+                response = controller.processCompletion(body);
             }
             
-            // Optional fields with defaults
-            if (j.contains("randomSeed") && j["randomSeed"].is_number_integer()) {
-                params.randomSeed = j["randomSeed"].get<int>();
+            // Add CORS headers
+            std::map<std::string, std::string> cors_headers = {
+                {"Access-Control-Allow-Origin", "*"},
+                {"Access-Control-Allow-Methods", "POST, OPTIONS"},
+                {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With"}
+            };
+            
+            // Merge response headers with CORS headers
+            for (const auto& [key, value] : response.headers) {
+                cors_headers[key] = value;
             }
             
-            if (j.contains("maxNewTokens") && j["maxNewTokens"].is_number_integer()) {
-                params.maxNewTokens = j["maxNewTokens"].get<int>();
-            }
+            // Send the response
+            send_response(sock, response.status_code, response.body.dump(), cors_headers);
             
-            if (j.contains("minLength") && j["minLength"].is_number_integer()) {
-                params.minLength = j["minLength"].get<int>();
+            if (response.status_code == 200) {
+                // Extract TPS for logging if available
+                float tps = response.body.value("tps", 0.0f);
+                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for model '%s' (%.2f tokens/sec)",
+                                      std::this_thread::get_id(), modelName.c_str(), tps);
             }
-            
-            if (j.contains("temperature") && j["temperature"].is_number()) {
-                params.temperature = j["temperature"].get<float>();
-            }
-            
-            if (j.contains("topP") && j["topP"].is_number()) {
-                params.topP = j["topP"].get<float>();
-            }
-            
-            if (j.contains("streaming") && j["streaming"].is_boolean()) {
-                params.streaming = j["streaming"].get<bool>();
-            }
-            
-            if (j.contains("kvCacheFilePath") && j["kvCacheFilePath"].is_string()) {
-                params.kvCacheFilePath = j["kvCacheFilePath"].get<std::string>();
-            }
-            
-            if (j.contains("seqId") && j["seqId"].is_number_integer()) {
-                params.seqId = j["seqId"].get<int>();
-            }
-
-            // Grammar and JSON schema support
-            if (j.contains("grammar") && j["grammar"].is_string()) {
-                params.grammar = j["grammar"].get<std::string>();
-            }
-            if (j.contains("jsonSchema")) {
-                if (j["jsonSchema"].is_string()) {
-                    params.jsonSchema = j["jsonSchema"].get<std::string>();
-                } else if (j["jsonSchema"].is_object()) {
-                    params.jsonSchema = j["jsonSchema"].dump();
-                }
-            }
-            if (j.contains("response_format") && j["response_format"].is_object()) {
-                const auto &rf = j["response_format"];
-                if (rf.contains("type") && rf["type"].is_string()) {
-                    const std::string type = rf["type"].get<std::string>();
-                    if (type == "json_object") {
-                        params.jsonSchema = std::string("{") + "\"type\":\"object\"}";
-                    } else if (type == "json_schema") {
-                        if (rf.contains("json_schema")) {
-                            const auto &js = rf["json_schema"];
-                            if (js.is_object()) {
-                                if (js.contains("schema") && js["schema"].is_object()) {
-                                    params.jsonSchema = js["schema"].dump();
-                                } else {
-                                    params.jsonSchema = js.dump();
-                                }
-                            } else if (js.is_string()) {
-                                params.jsonSchema = js.get<std::string>();
-                            }
-                        }
-                    }
-                }
-            }
-            
-            finalizeStructuredOutput(params, "completion");
-            return params;
         }
-
-        /**
-         * @brief Converts CompletionResult to JSON response
-         */
-        json completionResultToJson(const CompletionResult& result)
-        {
-            json response;
-            
-            response["tokens"] = result.tokens;
-            response["text"] = result.text;
-            response["tps"] = result.tps;
-            response["ttft"] = result.ttft;
-            response["prompt_tokens"] = result.prompt_token_count;
-            response["completion_tokens"] = static_cast<int>(result.tokens.size());
-            response["total_tokens"] = response["prompt_tokens"].get<int>() + response["completion_tokens"].get<int>();
-            
-            return response;
-        }
-
+        
+    } catch (const json::parse_error& ex) {
+        ServerLogger::logError("[Thread %u] JSON parsing error: %s", 
+                               std::this_thread::get_id(), ex.what());
+        json error = {
+            {"error", {
+                {"message", std::string("Invalid JSON: ") + ex.what()},
+                {"type", "invalid_request_error"}
+            }}
+        };
+        send_response(sock, 400, error.dump());
+    } catch (const std::exception& ex) {
+        ServerLogger::logError("[Thread %u] Error handling completion request: %s", 
+                               std::this_thread::get_id(), ex.what());
+        json error = {
+            {"error", {
+                {"message", std::string("Error: ") + ex.what()},
+                {"type", "invalid_request_error"}
+            }}
+        };
+        send_response(sock, 400, error.dump());
     }
-
-    CompletionRoute::CompletionRoute()
-    {
-    }
-
-    CompletionRoute::~CompletionRoute() = default;
-
-    bool CompletionRoute::match(const std::string& method, const std::string& path)
-    {
-        return (method == "POST" && 
-                (path == "/v1/inference/completions" || path == "/inference/completions" ||
-                 path == "/v1/inference/chat/completions" || path == "/inference/chat/completions"));
-    }
-
-    void CompletionRoute::handle(SocketType sock, const std::string& body)
-    {
-        try
-        {
-            // Check for empty body
-            if (body.empty())
-            {
-                throw std::invalid_argument("Request body is empty");
-            }
-
-            auto j = json::parse(body);
-            
-            // Determine the type of request based on the presence of 'messages' field in the JSON
-            if (j.contains("messages"))
-            {
-                handleChatCompletion(sock, body);
-            }
-            else if (j.contains("prompt"))
-            {
-                handleTextCompletion(sock, body);
-            }
-            else
-            {
-                throw std::invalid_argument("Invalid request: missing 'messages' or 'prompt' field");
-            }
-        }
-        catch (const json::parse_error &ex)
-        {
-            ServerLogger::logError("JSON parsing error: %s", ex.what());
-            json jError = {{"error", {{"message", std::string("Invalid JSON: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-            send_response(sock, 400, jError.dump());
-        }
-        catch (const std::exception &ex)
-        {
-            ServerLogger::logError("Error handling completion request: %s", ex.what());
-            json jError = {{"error", {{"message", std::string("Error: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-            send_response(sock, 400, jError.dump());
-        }
-    }
-
-    bool CompletionRoute::isTextCompletionPath(const std::string& path)
-    {
-        return (path == "/v1/inference/completions" || path == "/inference/completions");
-    }
-
-    bool CompletionRoute::isChatCompletionPath(const std::string& path)
-    {
-        return (path == "/v1/inference/chat/completions" || path == "/inference/chat/completions");
-    }
-
-    void CompletionRoute::handleChatCompletion(SocketType sock, const std::string& body)
-    {
-        try
-        {
-            auto j = json::parse(body);
-            ServerLogger::logInfo("[Thread %u] Received inference chat completion request", std::this_thread::get_id());
-
-            // Extract model name (required field)
-            std::string modelName;
-            if (j.contains("model") && j["model"].is_string()) {
-                modelName = j["model"].get<std::string>();
-            } else {
-                throw std::invalid_argument("Missing or invalid 'model' field");
-            }
-
-            // Parse the chat completion parameters (includes structured output precedence & logging)
-            ChatCompletionParameters params = parseChatCompletionParameters(j);
-
-            ServerLogger::logInfo("[Thread %u] Processing chat completion for model '%s' with seqId: %d", 
-                                      std::this_thread::get_id(), modelName.c_str(), params.seqId);
-
-            if (!params.isValid())
-            {
-                throw std::invalid_argument("Invalid chat completion parameters");
-            }
-
-            // Get the NodeManager and inference engine
-            auto& nodeManager = ServerAPI::instance().getNodeManager();
-            auto engine = nodeManager.getEngine(modelName);
-
-            if (!engine)
-            {
-                throw std::runtime_error("Model '" + modelName + "' not found or could not be loaded");
-            }
-
-            if (params.streaming)
-            {
-                // Handle streaming response
-                ServerLogger::logInfo("[Thread %u] Processing streaming inference chat completion request for model '%s'",
-                                      std::this_thread::get_id(), modelName.c_str());
-
-                // Submit job to inference engine
-                int jobId = engine->submitChatCompletionsJob(params);
-
-                if (jobId < 0)
-                {
-                    throw std::runtime_error("Failed to submit chat completion job to inference engine");
-                }
-
-                // Start the streaming response with proper SSE headers
-                begin_streaming_response(sock, 200, {{"Content-Type", "text/event-stream"}, {"Cache-Control", "no-cache"}});
-
-                bool firstTokenRecorded = false;
-                std::string previousText = "";
-                size_t lastTokenCount = 0;
-
-                // Poll for results until job is finished
-                while (!engine->isJobFinished(jobId))
-                {
-                    // Check for errors
-                    if (engine->hasJobError(jobId))
-                    {
-                        std::string error = engine->getJobError(jobId);
-                        ServerLogger::logError("[Thread %u] Inference job error: %s", std::this_thread::get_id(), error.c_str());
-
-                        // Send error as final chunk
-                        json errorResponse;
-                        errorResponse["error"] = error;
-                        errorResponse["text"] = "";
-                        errorResponse["tokens"] = json::array();
-                        errorResponse["tps"] = 0.0f;
-                        errorResponse["ttft"] = 0.0f;
-
-                        std::string sseData = "data: " + errorResponse.dump() + "\n\n";
-                        send_stream_chunk(sock, StreamChunk(sseData, false));
-                        break;
-                    }
-
-                    // Get current result
-                    CompletionResult result = engine->getJobResult(jobId);
-                    
-                    // Check if we have new content to stream
-                    if (result.text.length() > previousText.length())
-                    {
-                        // Record first token if this is the first output
-                        if (!firstTokenRecorded && result.text.length() > 0)
-                        {
-                            firstTokenRecorded = true;
-                        }
-
-                        std::string newContent = result.text.substr(previousText.length());
-
-                        // Create partial result for streaming
-                        CompletionResult partialResult;
-                        partialResult.text = newContent;
-                        partialResult.tps = result.tps;
-                        partialResult.ttft = result.ttft;
-                        // Only include new tokens since last update based on token vector growth
-                        if (result.tokens.size() > lastTokenCount) {
-                            auto startIt = result.tokens.begin() + static_cast<long>(lastTokenCount);
-                            partialResult.tokens.assign(startIt, result.tokens.end());
-                        }
-                        partialResult.prompt_token_count = result.prompt_token_count;
-
-                        json streamResponse = completionResultToJson(partialResult);
-                        streamResponse["partial"] = true;
-
-                        // Format as SSE data message
-                        std::string sseData = "data: " + streamResponse.dump() + "\n\n";
-                        send_stream_chunk(sock, StreamChunk(sseData, false));
-
-                        previousText = result.text;
-                        lastTokenCount = result.tokens.size();
-                    }
-
-                    // Brief sleep to avoid busy waiting
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-
-                // Send the final [DONE] marker to indicate completion
-                send_stream_chunk(sock, StreamChunk("data: [DONE]\n\n", false));
-
-                // Then terminate the stream
-                send_stream_chunk(sock, StreamChunk("", true));
-
-                if (engine->hasJobError(jobId))
-                {
-                }
-                else
-                {
-                }
-
-                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d",
-                                      std::this_thread::get_id(), jobId);
-            }
-            else
-            {
-                // Handle normal (non-streaming) response
-                ServerLogger::logInfo("[Thread %u] Processing non-streaming inference chat completion request for model '%s'",
-                                      std::this_thread::get_id(), modelName.c_str());
-
-                // Submit job to inference engine
-                int jobId = engine->submitChatCompletionsJob(params);
-
-                if (jobId < 0)
-                {
-                    throw std::runtime_error("Failed to submit chat completion job to inference engine");
-                }
-
-                // Wait for job completion
-                engine->waitForJob(jobId);
-
-                // Check for errors
-                if (engine->hasJobError(jobId))
-                {
-                    std::string error = engine->getJobError(jobId);
-                    throw std::runtime_error("Inference error: " + error);
-                }
-
-                // Get the final result
-                CompletionResult result = engine->getJobResult(jobId);
-
-                // Convert result to JSON and send response
-                json response = completionResultToJson(result);
-                send_response(sock, 200, response.dump());
-
-                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec)",
-                                      std::this_thread::get_id(), jobId, result.tps);
-            }
-        }
-        catch (const json::exception& ex)
-        {
-            // Specifically handle JSON parsing errors
-            ServerLogger::logError("[Thread %u] JSON parsing error: %s",
-                                   std::this_thread::get_id(), ex.what());
-
-            json jError = {{"error", {{"message", std::string("Invalid JSON: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-
-            send_response(sock, 400, jError.dump());
-        }
-        catch (const std::exception& ex)
-        {
-            ServerLogger::logError("[Thread %u] Error handling inference chat completion: %s",
-                                   std::this_thread::get_id(), ex.what());
-
-            json jError = {{"error", {{"message", std::string("Error: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-
-            send_response(sock, 400, jError.dump());
-        }
-    }
-
-    void CompletionRoute::handleTextCompletion(SocketType sock, const std::string& body)
-    {
-        try
-        {
-            auto j = json::parse(body);
-            ServerLogger::logInfo("[Thread %u] Received inference completion request", std::this_thread::get_id());
-
-            // Extract model name (required field)
-            std::string modelName;
-            if (j.contains("model") && j["model"].is_string()) {
-                modelName = j["model"].get<std::string>();
-            } else {
-                throw std::invalid_argument("Missing or invalid 'model' field");
-            }
-
-            // Parse the completion parameters (includes structured output precedence & logging)
-            CompletionParameters params = parseCompletionParameters(j);
-
-            if (!params.isValid())
-            {
-                throw std::invalid_argument("Invalid completion parameters");
-            }
-
-            // Get the NodeManager and inference engine
-            auto& nodeManager = ServerAPI::instance().getNodeManager();
-            auto engine = nodeManager.getEngine(modelName);
-
-            if (!engine)
-            {
-                throw std::runtime_error("Model '" + modelName + "' not found or could not be loaded");
-            }
-
-            if (params.streaming)
-            {
-                // Handle streaming response
-                ServerLogger::logInfo("[Thread %u] Processing streaming inference completion request for model '%s'",
-                                      std::this_thread::get_id(), modelName.c_str());
-
-                // Submit job to inference engine
-                int jobId = engine->submitCompletionsJob(params);
-
-                if (jobId < 0)
-                {
-                    throw std::runtime_error("Failed to submit completion job to inference engine");
-                }
-
-                // Start the streaming response with proper SSE headers
-                begin_streaming_response(sock, 200, {{"Content-Type", "text/event-stream"}, {"Cache-Control", "no-cache"}});
-
-                bool firstTokenRecorded = false;
-                std::string previousText = "";
-                size_t lastTokenCount = 0;
-
-                // Poll for results until job is finished
-                while (!engine->isJobFinished(jobId))
-                {
-                    // Check for errors
-                    if (engine->hasJobError(jobId))
-                    {
-                        std::string error = engine->getJobError(jobId);
-                        ServerLogger::logError("[Thread %u] Inference job error: %s", std::this_thread::get_id(), error.c_str());
-
-                        // Send error as final chunk
-                        json errorResponse;
-                        errorResponse["error"] = error;
-                        errorResponse["text"] = "";
-                        errorResponse["tokens"] = json::array();
-                        errorResponse["tps"] = 0.0f;
-                        errorResponse["ttft"] = 0.0f;
-
-                        std::string sseData = "data: " + errorResponse.dump() + "\n\n";
-                        send_stream_chunk(sock, StreamChunk(sseData, false));
-                        break;
-                    }
-
-                    // Get current result
-                    CompletionResult result = engine->getJobResult(jobId);
-                    
-                    // Check if we have new content to stream
-                    if (result.text.length() > previousText.length())
-                    {
-                        // Record first token if this is the first output
-                        if (!firstTokenRecorded && result.text.length() > 0)
-                        {
-                            firstTokenRecorded = true;
-                        }
-
-                        std::string newContent = result.text.substr(previousText.length());
-
-                        // Create partial result for streaming
-                        CompletionResult partialResult;
-                        partialResult.text = newContent;
-                        partialResult.tps = result.tps;
-                        partialResult.ttft = result.ttft;
-                        // Only include new tokens since last update based on token vector growth
-                        if (result.tokens.size() > lastTokenCount) {
-                            auto startIt = result.tokens.begin() + static_cast<long>(lastTokenCount);
-                            partialResult.tokens.assign(startIt, result.tokens.end());
-                        }
-                        partialResult.prompt_token_count = result.prompt_token_count;
-
-                        json streamResponse = completionResultToJson(partialResult);
-                        streamResponse["partial"] = true;
-
-                        // Format as SSE data message
-                        std::string sseData = "data: " + streamResponse.dump() + "\n\n";
-                        send_stream_chunk(sock, StreamChunk(sseData, false));
-
-                        previousText = result.text;
-                        lastTokenCount = result.tokens.size();
-                    }
-
-                    // Brief sleep to avoid busy waiting
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-
-                // Send the final [DONE] marker to indicate completion
-                send_stream_chunk(sock, StreamChunk("data: [DONE]\n\n", false));
-
-                // Then terminate the stream
-                send_stream_chunk(sock, StreamChunk("", true));
-
-                if (engine->hasJobError(jobId))
-                {
-                }
-                else
-                {
-                }
-
-                ServerLogger::logInfo("[Thread %u] Completed streaming response for job %d",
-                                      std::this_thread::get_id(), jobId);
-            }
-            else
-            {
-                // Handle normal (non-streaming) response
-                ServerLogger::logInfo("[Thread %u] Processing non-streaming inference completion request for model '%s'",
-                                      std::this_thread::get_id(), modelName.c_str());
-
-                // Submit job to inference engine
-                int jobId = engine->submitCompletionsJob(params);
-
-                if (jobId < 0)
-                {
-                    throw std::runtime_error("Failed to submit completion job to inference engine");
-                }
-
-                // Wait for job completion
-                engine->waitForJob(jobId);
-
-                // Check for errors
-                if (engine->hasJobError(jobId))
-                {
-                    std::string error = engine->getJobError(jobId);
-                    throw std::runtime_error("Inference error: " + error);
-                }
-
-                // Get the final result
-                CompletionResult result = engine->getJobResult(jobId);
-
-                // Convert result to JSON and send response
-                json response = completionResultToJson(result);
-                send_response(sock, 200, response.dump());
-
-                ServerLogger::logInfo("[Thread %u] Completed non-streaming response for job %d (%.2f tokens/sec)",
-                                      std::this_thread::get_id(), jobId, result.tps);
-            }
-        }
-        catch (const json::exception& ex)
-        {
-            // Specifically handle JSON parsing errors
-            ServerLogger::logError("[Thread %u] JSON parsing error: %s",
-                                   std::this_thread::get_id(), ex.what());
-
-            json jError = {{"error", {{"message", std::string("Invalid JSON: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-
-            send_response(sock, 400, jError.dump());
-        }
-        catch (const std::exception& ex)
-        {
-            ServerLogger::logError("[Thread %u] Error handling inference completion: %s",
-                                   std::this_thread::get_id(), ex.what());
-
-            json jError = {{"error", {{"message", std::string("Error: ") + ex.what()}, {"type", "invalid_request_error"}}}};
-
-            send_response(sock, 400, jError.dump());
-        }
-    }
+}
 
 } // namespace kolosal
