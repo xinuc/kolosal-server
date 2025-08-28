@@ -5,6 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <chrono>
 
 namespace kolosal {
 namespace controllers {
@@ -23,13 +24,47 @@ BaseController::Response DownloadsController::getAllDownloads() {
         auto downloads = download_manager_->getAllActiveDownloads();
         nlohmann::json downloadsArray = nlohmann::json::array();
         
+        // Statistics for summary
+        int active_downloads = 0;
+        int completed_downloads = 0;
+        int failed_downloads = 0;
+        int startup_downloads = 0;
+        int regular_downloads = 0;
+        
         for (const auto& [modelId, progress] : downloads) {
-            downloadsArray.push_back(formatDownloadProgress(progress));
+            // Add download_type field for list responses
+            nlohmann::json downloadInfo = formatDownloadProgress(progress);
+            downloadInfo["download_type"] = progress->engine_params ? "startup" : "regular";
+            downloadsArray.push_back(downloadInfo);
+            
+            // Update statistics
+            if (progress->status == "downloading" || progress->status == "creating_engine") {
+                active_downloads++;
+            } else if (progress->status == "completed") {
+                completed_downloads++;
+            } else if (progress->status == "failed") {
+                failed_downloads++;
+            }
+            
+            if (progress->engine_params) {
+                startup_downloads++;
+            } else {
+                regular_downloads++;
+            }
         }
         
         nlohmann::json response = {
             {"downloads", downloadsArray},
-            {"total", downloadsArray.size()}
+            {"summary", {
+                {"total_downloads", static_cast<int>(downloads.size())},
+                {"active_downloads", active_downloads},
+                {"completed_downloads", completed_downloads},
+                {"failed_downloads", failed_downloads},
+                {"startup_downloads", startup_downloads},
+                {"regular_downloads", regular_downloads}
+            }},
+            {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()}
         };
         
         return ok(response);
@@ -45,9 +80,21 @@ BaseController::Response DownloadsController::getDownloadProgress(const std::str
         auto progress = download_manager_->getDownloadProgress(model_id);
         
         if (progress) {
+            ServerLogger::logInfo("Successfully provided download progress for model: %s (%.1f%%)",
+                                model_id.c_str(), progress->percentage);
             return ok(formatDownloadProgress(progress));
         } else {
-            return notFound("Download not found for model: " + model_id, "model_id");
+            // Match old error format exactly with error code
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "No download found for model ID: " + model_id},
+                    {"type", "not_found_error"},
+                    {"param", "model_id"},
+                    {"code", "download_not_found"}
+                }}
+            };
+            ServerLogger::logInfo("No download found for model ID: %s", model_id.c_str());
+            return Response(404, error);
         }
         
     } catch (const std::exception& e) {
@@ -152,53 +199,97 @@ nlohmann::json DownloadsController::formatDownloadProgress(const std::shared_ptr
         return nlohmann::json::object();
     }
     
-    double percentage = 0.0;
-    if (progress->total_bytes > 0) {
-        percentage = (static_cast<double>(progress->downloaded_bytes) / progress->total_bytes) * 100.0;
+    // Calculate elapsed time
+    auto now = std::chrono::system_clock::now();
+    auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        (progress->status == "downloading" || progress->status == "creating_engine" ? now : progress->end_time) - progress->start_time)
+        .count();
+    
+    // Calculate download speed (bytes per second)
+    double download_speed = elapsed_seconds > 0 ? static_cast<double>(progress->downloaded_bytes) / elapsed_seconds : 0.0;
+    
+    // Estimate remaining time (only for active downloads)
+    int estimated_remaining_seconds = -1;
+    if (progress->status == "downloading" && progress->percentage > 0 && download_speed > 0) {
+        size_t remaining_bytes = progress->total_bytes - progress->downloaded_bytes;
+        estimated_remaining_seconds = static_cast<int>(remaining_bytes / download_speed);
     }
     
-    nlohmann::json result = {
+    // Ensure percentage is valid before sending response
+    double safe_percentage = progress->percentage;
+    if (std::isnan(safe_percentage) || std::isinf(safe_percentage) || safe_percentage < 0.0 || safe_percentage > 100.0) {
+        ServerLogger::logWarning("Invalid percentage value %.2f for model %s in API response, using 0.0", 
+                               progress->percentage, progress->model_id.c_str());
+        safe_percentage = 0.0;
+    }
+    
+    // Build response JSON matching old format exactly
+    nlohmann::json response = {
         {"model_id", progress->model_id},
+        {"type", progress->engine_params ? progress->engine_params->model_type : inferModelType(progress)},
+        {"status", progress->status},
         {"url", progress->url},
         {"local_path", progress->local_path},
-        {"status", progress->status},
-        {"downloaded_size", progress->downloaded_bytes},
-        {"total_size", progress->total_bytes},
-        {"percentage", percentage},
-        {"error", progress->error_message}
+        {"progress", {
+            {"downloaded_bytes", progress->downloaded_bytes},
+            {"total_bytes", progress->total_bytes},
+            {"percentage", safe_percentage},
+            {"download_speed_bps", download_speed}
+        }},
+        {"timing", {
+            {"start_time", std::chrono::duration_cast<std::chrono::milliseconds>(progress->start_time.time_since_epoch()).count()},
+            {"elapsed_seconds", elapsed_seconds}
+        }}
     };
     
-    // Add speed and time remaining if downloading
-    if (progress->status == "downloading" && progress->total_bytes > 0) {
-        // Calculate download speed if possible
-        auto now = std::chrono::system_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - progress->start_time).count();
-        if (elapsed > 0) {
-            double download_speed = static_cast<double>(progress->downloaded_bytes) / elapsed;
-            result["download_speed"] = formatDownloadSpeed(download_speed);
-            
-            if (progress->total_bytes > progress->downloaded_bytes) {
-                double remainingBytes = progress->total_bytes - progress->downloaded_bytes;
-                double remainingTime = remainingBytes / download_speed;
-                result["time_remaining"] = formatRemainingTime(remainingTime);
-            }
-        }
+    // Add end time and error message if applicable
+    if (progress->status != "downloading" && progress->status != "creating_engine") {
+        response["timing"]["end_time"] = std::chrono::duration_cast<std::chrono::milliseconds>(progress->end_time.time_since_epoch()).count();
     }
     
-    // Add model type
-    result["model_type"] = inferModelType(progress);
+    if (!progress->error_message.empty()) {
+        response["error_message"] = progress->error_message;
+    }
     
-    // Add engine params if available
+    if (estimated_remaining_seconds >= 0) {
+        response["timing"]["estimated_remaining_seconds"] = estimated_remaining_seconds;
+    }
+    
+    // Add engine creation info if applicable
     if (progress->engine_params) {
-        result["engine_params"] = {
+        nlohmann::json engineInfo = {
+            {"model_id", progress->engine_params->model_id},
             {"model_type", progress->engine_params->model_type},
             {"load_immediately", progress->engine_params->load_immediately},
             {"main_gpu_id", progress->engine_params->main_gpu_id},
             {"inference_engine", progress->engine_params->inference_engine}
         };
+        
+        // Add embedding-specific information
+        if (progress->engine_params->model_type == "embedding") {
+            engineInfo["embedding_features"] = {
+                {"normalization", true},
+                {"supports_batching", true},
+                {"optimized_for_retrieval", true}
+            };
+            
+            engineInfo["recommended_usage"] = {
+                {"document_embedding", true},
+                {"semantic_search", true},
+                {"similarity_computation", true}
+            };
+        } else {
+            engineInfo["llm_features"] = {
+                {"text_generation", true},
+                {"chat_completion", true},
+                {"instruction_following", true}
+            };
+        }
+        
+        response["engine_creation"] = engineInfo;
     }
     
-    return result;
+    return response;
 }
 
 std::string DownloadsController::inferModelType(const std::shared_ptr<DownloadProgress>& progress) {
@@ -229,47 +320,8 @@ std::string DownloadsController::inferModelType(const std::shared_ptr<DownloadPr
     return "llm"; // default
 }
 
-std::string DownloadsController::formatDownloadSpeed(double bytesPerSec) {
-    const double KB = 1024.0;
-    const double MB = KB * 1024.0;
-    const double GB = MB * 1024.0;
-    
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(2);
-    
-    if (bytesPerSec >= GB) {
-        ss << (bytesPerSec / GB) << " GB/s";
-    } else if (bytesPerSec >= MB) {
-        ss << (bytesPerSec / MB) << " MB/s";
-    } else if (bytesPerSec >= KB) {
-        ss << (bytesPerSec / KB) << " KB/s";
-    } else {
-        ss << bytesPerSec << " B/s";
-    }
-    
-    return ss.str();
-}
-
-std::string DownloadsController::formatRemainingTime(double seconds) {
-    if (std::isinf(seconds) || std::isnan(seconds)) {
-        return "unknown";
-    }
-    
-    int hours = static_cast<int>(seconds) / 3600;
-    int minutes = (static_cast<int>(seconds) % 3600) / 60;
-    int secs = static_cast<int>(seconds) % 60;
-    
-    std::ostringstream ss;
-    if (hours > 0) {
-        ss << hours << "h " << minutes << "m " << secs << "s";
-    } else if (minutes > 0) {
-        ss << minutes << "m " << secs << "s";
-    } else {
-        ss << secs << "s";
-    }
-    
-    return ss.str();
-}
+// These helper methods are no longer needed since we return numeric values
+// matching the old API format instead of formatted strings
 
 } // namespace controllers
 } // namespace kolosal

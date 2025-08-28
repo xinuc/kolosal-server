@@ -42,8 +42,6 @@ private:
     // Helper methods
     nlohmann::json formatDownloadProgress(const std::shared_ptr<DownloadProgress>& progress);
     std::string inferModelType(const std::shared_ptr<DownloadProgress>& progress);
-    std::string formatDownloadSpeed(double bytesPerSec);
-    std::string formatRemainingTime(double seconds);
 };
 
 } // namespace controllers
