@@ -1,100 +1,156 @@
-{    "server": {
-        "port": "8084",
-        "host": "0.0.0.0",
-        "max_connections": 100,
-        "worker_threads": 0,
-        "request_timeout": 30,
-        "max_request_size": 16777216,
-        "idle_timeout": 300,
-        "allow_public_access": false,
-        "allow_internet_access": false
-    },    "logging": {
-        "level": "INFO",
-        "file": "",
-        "access_log": false
-    },
-    "database": {
-        "qdrant": {
-            "enabled": true,
-            "host": "localhost",
-            "port": 6333,
-            "collection_name": "documents",
-            "default_embedding_model": "text-embedding-3-small",
-            "timeout": 30,
-            "api_key": "",
-            "max_connections": 10,
-            "connection_timeout": 5
-        }
-    },
-    "auth": {
-        "enabled": false,
-        "require_api_key": false,
-        "api_key_header": "X-API-Key",
-        "api_keys": [],
-        "rate_limit": {
-            "enabled": false,
-            "max_requests": 100,
-            "window_size": 60
-        },
-        "cors": {
-            "enabled": true,
-            "allow_credentials": false,
-            "max_age": 86400,
-            "allowed_origins": [
-                "*"
-            ],
-            "allowed_methods": [
-                "GET",
-                "POST",
-                "PUT",
-                "DELETE",
-                "OPTIONS",
-                "HEAD",
-                "PATCH"
-            ],
-            "allowed_headers": [
-                "Content-Type",
-                "Authorization",
-                "X-Requested-With",
-                "Accept",
-                "Origin"
-            ]
-        }    },
-    "models": [
-        {
-            "id": "qwen3-0.6b",
-            "name": "Qwen 3 0.6B",
-            "type": "completion",
-            "path": "https://huggingface.co/kolosal/qwen3-0.6b",
-            "context_length": 2048,
-            "batch_size": 512,
-            "gpu_layers": -1,
-            "rope_freq_base": 10000.0,
-            "rope_freq_scale": 1.0,
-            "embedding": false
-        },
-        {
-            "id": "all-minilm-l6-v2",
-            "name": "All-MiniLM-L6-v2 Embedding",
-            "type": "embedding",
-            "path": "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF",
-            "context_length": 512,
-            "batch_size": 512,
-            "gpu_layers": -1,
-            "embedding": true
-        }
-    ],
-    "features": {
-        "health_check": true,
-        "metrics": false
-    },
-    "inference_engines": [
-        {
-            "name": "llama-cpu",
-            "library_path": "./build/lib/libllama-cpu.dylib",
-            "description": "LLaMA engine for CPU/Metal inference",
-            "load_on_startup": true
-        }
-    ],
-    "default_inference_engine": "llama-cpu"
-}
+server:
+  port: 8080
+  host: 0.0.0.0
+  idle_timeout: 300
+  allow_public_access: false
+  allow_internet_access: false
+logging:
+  level: INFO
+  file: ""
+  access_log: false
+  quiet_mode: false
+  show_request_details: true
+auth:
+  enabled: false
+  require_api_key: false
+  api_key_header: X-API-Key
+  api_keys:
+    []
+  rate_limit:
+    enabled: false
+    max_requests: 100
+    window_size: 60
+  cors:
+    enabled: true
+    allow_credentials: false
+    max_age: 86400
+    allowed_origins:
+      - "*"
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+      - HEAD
+      - PATCH
+    allowed_headers:
+      - Content-Type
+      - Authorization
+      - X-Requested-With
+      - Accept
+      - Origin
+search:
+  enabled: false
+  searxng_url: http://localhost:4000
+  timeout: 30
+  max_results: 20
+  default_engine: ""
+  api_key: ""
+  enable_safe_search: true
+  default_format: json
+  default_language: en
+  default_category: general
+database:
+  vector_database: faiss
+  retrieval_embedding_model: text-embedding-3-small
+  qdrant:
+    enabled: true
+    host: localhost
+    port: 6333
+    collection_name: documents
+    default_embedding_model: text-embedding-3-small
+    timeout: 30
+    api_key: ""
+    max_connections: 10
+    connection_timeout: 5
+    embedding_batch_size: 5
+  faiss:
+    index_type: Flat
+    index_path: ./data/faiss_index
+    dimensions: 1536
+    normalize_vectors: true
+    nlist: 100
+    nprobe: 10
+    use_gpu: false
+    gpu_device: 0
+    metric_type: IP
+models:
+  - id: qwen3-0.6b
+    path: /Users/xinuc/Projects/kolosal-server/build/https://huggingface.co/kolosal/qwen3-0.6b
+    type: completion
+    load_immediately: true
+    main_gpu_id: 0
+    inference_engine: llama-cpu
+    load_params:
+      n_ctx: 4096
+      n_keep: 2048
+      use_mmap: true
+      use_mlock: true
+      n_parallel: 1
+      cont_batching: true
+      warmup: false
+      n_gpu_layers: 100
+      n_batch: 2048
+      n_ubatch: 512
+  - id: all-minilm-l6-v2
+    path: /Users/xinuc/Projects/kolosal-server/build/https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF
+    type: embedding
+    load_immediately: true
+    main_gpu_id: 0
+    inference_engine: llama-cpu
+    load_params:
+      n_ctx: 4096
+      n_keep: 2048
+      use_mmap: true
+      use_mlock: true
+      n_parallel: 1
+      cont_batching: true
+      warmup: false
+      n_gpu_layers: 100
+      n_batch: 2048
+      n_ubatch: 512
+  - id: llama-3.2-1b:Q8_0
+    path: /Users/xinuc/Library/Application Support/Kolosal/models/Llama-3.2-1B-Instruct-Q8_0.gguf
+    type: llm
+    load_immediately: false
+    main_gpu_id: 0
+    inference_engine: llama-cpu
+    load_params:
+      n_ctx: 8192
+      n_keep: 2048
+      use_mmap: true
+      use_mlock: true
+      n_parallel: 1
+      cont_batching: true
+      warmup: false
+      n_gpu_layers: 50
+      n_batch: 2048
+      n_ubatch: 512
+  - id: qwen2.5-coder-0.5b:Q8_0
+    path: /Users/xinuc/Library/Application Support/Kolosal/models/qwen2.5-coder-0.5b-instruct-q8_0.gguf
+    type: llm
+    load_immediately: false
+    main_gpu_id: 0
+    inference_engine: llama-cpu
+    load_params:
+      n_ctx: 8192
+      n_keep: 2048
+      use_mmap: true
+      use_mlock: true
+      n_parallel: 1
+      cont_batching: true
+      warmup: false
+      n_gpu_layers: 50
+      n_batch: 2048
+      n_ubatch: 512
+inference_engines:
+  - name: llama-cpu
+    library_path: /Users/xinuc/Projects/kolosal-server/build/.././build/lib/libllama-cpu.dylib
+    version: 1.0.0
+    description: LLaMA engine for CPU/Metal inference
+    load_on_startup: true
+default_inference_engine: llama-cpu
+features:
+  health_check: true
+  metrics: false

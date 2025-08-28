@@ -536,3 +536,10 @@ if(INSTALL_HEADERS)
         FILES_MATCHING PATTERN "*.hpp"
     )
 endif()
+
+# === TESTING ===
+option(BUILD_TESTS "Build API compatibility tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
