@@ -259,27 +259,38 @@ BaseController::Response AuthConfigController::clearRateLimit(const nlohmann::js
         
         auto& rateLimiter = auth_middleware_->getRateLimiter();
         
-        if (request.contains("ip") && request["ip"].is_string()) {
-            std::string ip = request["ip"];
-            rateLimiter.clearClient(ip);
+        if (request.contains("client_ip") && request["client_ip"].is_string()) {
+            std::string clientIP = request["client_ip"];
+            rateLimiter.clearClient(clientIP);
             
             nlohmann::json response = {
-                {"message", "Rate limit cleared for IP: " + ip},
+                {"message", "Rate limit data cleared for client: " + clientIP},
                 {"status", "success"}
             };
             
-            ServerLogger::logInfo("Cleared rate limit for IP: %s", ip.c_str());
+            ServerLogger::logInfo("Cleared rate limit data for client: %s", clientIP.c_str());
             return ok(response);
-        } else {
-            // Clear all rate limits
+        } else if (request.contains("clear_all") && request["clear_all"].is_boolean() && request["clear_all"]) {
+            // Clear all rate limits when clear_all is true
             rateLimiter.clearAll();
             
             nlohmann::json response = {
-                {"message", "All rate limits cleared"},
+                {"message", "All rate limit data cleared"},
                 {"status", "success"}
             };
             
-            ServerLogger::logInfo("Cleared all rate limits");
+            ServerLogger::logInfo("Cleared all rate limit data");
+            return ok(response);
+        } else {
+            // Default behavior when no specific field provided (for backward compatibility)
+            rateLimiter.clearAll();
+            
+            nlohmann::json response = {
+                {"message", "All rate limit data cleared"},
+                {"status", "success"}
+            };
+            
+            ServerLogger::logInfo("Cleared all rate limit data");
             return ok(response);
         }
         

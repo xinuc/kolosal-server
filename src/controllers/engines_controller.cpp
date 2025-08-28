@@ -75,61 +75,152 @@ BaseController::Response EnginesController::addEngine(const std::string& body) {
     }
 }
 
-BaseController::Response EnginesController::addEngine(const nlohmann::json& request) {
+BaseController::Response EnginesController::addEngine(const nlohmann::json& requestData) {
     try {
+        ServerLogger::logDebug("Received add inference engine request");
+        
+        // Validate required fields
+        if (!requestData.contains("name") || !requestData.contains("library_path")) {
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Missing required fields: 'name' and 'library_path' are required"},
+                    {"type", "invalid_request_error"},
+                    {"param", "body"},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(400, error);
+        }
+        
+        // Extract engine configuration
+        std::string engineName = requestData["name"];
+        std::string libraryPath = requestData["library_path"];
+        std::string description = requestData.value("description", "");
+        bool loadOnStartup = requestData.value("load_on_startup", true);
+        
+        // Validate engine name and path uniqueness
+        auto& config = ServerConfig::getInstance();
+        for (const auto& existingEngine : config.inferenceEngines) {
+            if (existingEngine.name == engineName && existingEngine.library_path == libraryPath) {
+                // Engine with same name and path already exists
+                // Check actual loading status from NodeManager
+                if (!node_manager_) {
+                    node_manager_ = &ServerAPI::instance().getNodeManager();
+                }
+                auto availableEngines = node_manager_->getAvailableInferenceEngines();
+                
+                bool actuallyLoaded = false;
+                for (const auto& engine : availableEngines) {
+                    if (engine.name == engineName && engine.library_path == libraryPath) {
+                        actuallyLoaded = engine.is_loaded;
+                        break;
+                    }
+                }
+                
+                nlohmann::json response = {
+                    {"message", "Engine with name '" + engineName + "' and path '" + libraryPath + "' already exists"},
+                    {"status", "success"},
+                    {"engine", {
+                        {"name", existingEngine.name},
+                        {"library_path", existingEngine.library_path},
+                        {"description", existingEngine.description},
+                        {"load_on_startup", existingEngine.load_on_startup},
+                        {"is_loaded", actuallyLoaded}
+                    }}
+                };
+                ServerLogger::logInfo("Engine '%s' already exists in config - actual load status: %s",
+                                    engineName.c_str(), actuallyLoaded ? "loaded" : "not loaded");
+                return Response(200, response);
+            } else if (existingEngine.name == engineName) {
+                nlohmann::json error = {
+                    {"error", {
+                        {"message", "Engine with name '" + engineName + "' already exists with different path"},
+                        {"type", "invalid_request_error"},
+                        {"param", "name"},
+                        {"code", nullptr}
+                    }}
+                };
+                return Response(409, error);
+            }
+        }
+        
+        // Validate library path exists
+        if (!std::filesystem::exists(libraryPath)) {
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Library file not found: " + libraryPath},
+                    {"type", "invalid_request_error"},
+                    {"param", "library_path"},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(400, error);
+        }
+        
+        // Create new engine configuration
+        InferenceEngineConfig newEngine(engineName, ServerConfig::makeAbsolutePath(libraryPath), description);
+        newEngine.load_on_startup = loadOnStartup;
+        
+        // Add to server config
+        config.inferenceEngines.push_back(newEngine);
+        
+        // Save updated config to file
+        ServerLogger::logInfo("About to save configuration after adding engine '%s'", engineName.c_str());
+        ServerLogger::logInfo("Current config file path in EnginesController: '%s'", config.getCurrentConfigFilePath().c_str());
+        
+        if (!config.saveToCurrentFile()) {
+            // Remove the engine from memory if save failed
+            config.inferenceEngines.pop_back();
+            
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Failed to save configuration to file"},
+                    {"type", "server_error"},
+                    {"param", nullptr},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(500, error);
+        }
+        
+        // Reconfigure inference loader with updated engines
         if (!node_manager_) {
             node_manager_ = &ServerAPI::instance().getNodeManager();
         }
         
-        // Validate request
-        if (!validateEngineConfig(request)) {
-            return badRequest("Invalid engine configuration. Required fields: name, library_path");
+        if (!node_manager_->reconfigureEngines(config.inferenceEngines)) {
+            ServerLogger::logWarning("Failed to reconfigure inference engines after adding new engine");
         }
         
-        std::string name = request["name"];
-        std::string libraryPath = request["library_path"];
+        // Prepare response
+        nlohmann::json engineInfo = {
+            {"name", newEngine.name},
+            {"library_path", newEngine.library_path},
+            {"description", newEngine.description},
+            {"load_on_startup", newEngine.load_on_startup},
+            {"is_loaded", false} // Newly added engines are not loaded by default
+        };
         
-        // Validate library path
-        if (!validateLibraryPath(libraryPath)) {
-            return badRequest("Library path does not exist: " + libraryPath, "library_path");
-        }
+        nlohmann::json response = {
+            {"message", "Inference engine added successfully"},
+            {"engine", engineInfo}
+        };
         
-        // Extract optional fields
-        std::string version = request.value("version", "1.0");
-        std::string description = request.value("description", "");
+        ServerLogger::logInfo("Successfully added inference engine: %s", engineName.c_str());
+        return Response(201, response);
         
-        // Add engine to NodeManager
-        // Note: NodeManager doesn't have a direct registerInferenceEngine method
-        // This would need to be implemented in NodeManager
-        bool success = false;
-        try {
-            // For now, we can only report available engines, not add new ones
-            // This would require modifying NodeManager API
-            return serverError("Adding new inference engines at runtime is not yet supported");
-        } catch (...) {
-            success = false;
-        }
+    } catch (const std::exception& ex) {
+        ServerLogger::logError("Error handling add inference engine request: %s", ex.what());
         
-        if (success) {
-            nlohmann::json response = {
-                {"message", "Engine added successfully"},
-                {"engine", {
-                    {"name", name},
-                    {"library_path", libraryPath},
-                    {"version", version}
-                }}
-            };
-            
-            ServerLogger::logInfo("Added inference engine: %s", name.c_str());
-            return Response(201, response);  // Created
-            
-        } else {
-            return serverError("Failed to add engine. It may already exist or the library is invalid.");
-        }
-        
-    } catch (const std::exception& e) {
-        ServerLogger::logError("Error adding engine: %s", e.what());
-        return serverError(e.what());
+        nlohmann::json error = {
+            {"error", {
+                {"message", std::string("Server error: ") + ex.what()},
+                {"type", "server_error"},
+                {"param", nullptr},
+                {"code", nullptr}
+            }}
+        };
+        return Response(500, error);
     }
 }
 
@@ -150,23 +241,29 @@ BaseController::Response EnginesController::setDefaultEngine(const std::string& 
     }
 }
 
-BaseController::Response EnginesController::setDefaultEngine(const nlohmann::json& request) {
+BaseController::Response EnginesController::setDefaultEngine(const nlohmann::json& requestData) {
     try {
-        if (!request.contains("engine") || !request["engine"].is_string()) {
-            return badRequest("Missing or invalid 'engine' field", "engine");
+        ServerLogger::logDebug("Received set default inference engine request");
+        
+        // Validate required field
+        if (!requestData.contains("engine_name")) {
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Missing required field: 'engine_name' is required"},
+                    {"type", "invalid_request_error"},
+                    {"param", "body"},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(400, error);
         }
         
-        std::string engineName = request["engine"];
+        std::string engineName = requestData["engine_name"];
         
-        // Verify engine exists
-        if (!node_manager_) {
-            node_manager_ = &ServerAPI::instance().getNodeManager();
-        }
-        
-        auto engines = node_manager_->getAvailableInferenceEngines();
+        // Validate that the engine exists in the configuration
+        auto& config = ServerConfig::getInstance();
         bool engineExists = false;
-        
-        for (const auto& engine : engines) {
+        for (const auto& engine : config.inferenceEngines) {
             if (engine.name == engineName) {
                 engineExists = true;
                 break;
@@ -174,24 +271,57 @@ BaseController::Response EnginesController::setDefaultEngine(const nlohmann::jso
         }
         
         if (!engineExists) {
-            return notFound("Engine not found: " + engineName, "engine");
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Engine '" + engineName + "' not found in configuration"},
+                    {"type", "invalid_request_error"},
+                    {"param", "engine_name"},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(404, error);
         }
         
-        // Update config
-        config_->defaultInferenceEngine = engineName;
+        // Update the default engine in config
+        config.defaultInferenceEngine = engineName;
         
-        // Update config in memory (saveConfig not available)
+        // Save updated config to file
+        ServerLogger::logInfo("About to save configuration after setting default engine to '%s'", engineName.c_str());
+        ServerLogger::logInfo("Current config file path in EnginesController: '%s'", config.getCurrentConfigFilePath().c_str());
+        
+        if (!config.saveToCurrentFile()) {
+            nlohmann::json error = {
+                {"error", {
+                    {"message", "Failed to save configuration to file"},
+                    {"type", "server_error"},
+                    {"param", nullptr},
+                    {"code", nullptr}
+                }}
+            };
+            return Response(500, error);
+        }
+        
+        // Prepare response
         nlohmann::json response = {
-            {"message", "Default engine updated successfully"},
+            {"message", "Default inference engine set successfully"},
             {"default_engine", engineName}
         };
         
-        ServerLogger::logInfo("Set default engine to: %s", engineName.c_str());
-        return ok(response);
+        ServerLogger::logInfo("Successfully set default inference engine to: %s", engineName.c_str());
+        return Response(200, response);
         
-    } catch (const std::exception& e) {
-        ServerLogger::logError("Error setting default engine: %s", e.what());
-        return serverError(e.what());
+    } catch (const std::exception& ex) {
+        ServerLogger::logError("Error handling set default inference engine request: %s", ex.what());
+        
+        nlohmann::json error = {
+            {"error", {
+                {"message", std::string("Server error: ") + ex.what()},
+                {"type", "server_error"},
+                {"param", nullptr},
+                {"code", nullptr}
+            }}
+        };
+        return Response(500, error);
     }
 }
 

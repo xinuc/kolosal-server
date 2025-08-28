@@ -56,13 +56,13 @@ BaseController::Response DocumentsController::addDocuments(const nlohmann::json&
         
         // Initialize document service if needed
         if (!ensureDocumentService()) {
-            return serverError("Failed to initialize document service");
+            return serverErrorWithCode("Failed to initialize document service", "service_error");
         }
         
         // Test connection
         bool connected = document_service_->testConnection().get();
         if (!connected) {
-            return Response(503, nlohmann::json({{"error", "Database connection failed"}}));
+            return serviceUnavailableWithCode("Database connection failed", "service_unavailable");
         }
         
         // Process documents
@@ -123,13 +123,13 @@ BaseController::Response DocumentsController::removeDocuments(const nlohmann::js
         
         // Initialize document service if needed
         if (!ensureDocumentService()) {
-            return serverError("Failed to initialize document service");
+            return serverErrorWithCode("Failed to initialize document service", "service_error");
         }
         
         // Test connection
         bool connected = document_service_->testConnection().get();
         if (!connected) {
-            return Response(503, nlohmann::json({{"error", "Database connection failed"}}));
+            return serviceUnavailableWithCode("Database connection failed", "service_unavailable");
         }
         
         // Process removal
@@ -156,13 +156,13 @@ BaseController::Response DocumentsController::listDocuments() {
         
         // Initialize document service if needed
         if (!ensureDocumentService()) {
-            return serverError("Failed to initialize document service");
+            return serverErrorWithCode("Failed to initialize document service", "service_error");
         }
         
         // Test connection
         bool connected = document_service_->testConnection().get();
         if (!connected) {
-            return Response(503, nlohmann::json({{"error", "Database connection failed"}}));
+            return serviceUnavailableWithCode("Database connection failed", "service_unavailable");
         }
         
         // Get list of document IDs
@@ -222,13 +222,13 @@ BaseController::Response DocumentsController::getDocumentsInfo(const nlohmann::j
         
         // Initialize document service if needed
         if (!ensureDocumentService()) {
-            return serverError("Failed to initialize document service");
+            return serverErrorWithCode("Failed to initialize document service", "service_error");
         }
         
         // Test connection
         bool connected = document_service_->testConnection().get();
         if (!connected) {
-            return Response(503, nlohmann::json({{"error", "Database connection failed"}}));
+            return serviceUnavailableWithCode("Database connection failed", "service_unavailable");
         }
         
         // Get documents info
@@ -307,13 +307,13 @@ BaseController::Response DocumentsController::retrieveDocuments(const nlohmann::
         
         // Initialize document service if needed
         if (!ensureDocumentService()) {
-            return serverError("Failed to initialize document service");
+            return serverErrorWithCode("Failed to initialize document service", "service_error");
         }
         
         // Test connection
         bool connected = document_service_->testConnection().get();
         if (!connected) {
-            return Response(503, nlohmann::json({{"error", "Database connection failed"}}));
+            return serviceUnavailableWithCode("Database connection failed", "service_unavailable");
         }
         
         // Process retrieval

@@ -66,6 +66,22 @@ protected:
         return Response(400, error);
     }
     
+    // Enhanced version with details field for backward compatibility
+    Response badRequestWithDetails(const std::string& message, const std::string& details, 
+                                   const std::string& param = "") {
+        nlohmann::json error = {
+            {"error", {
+                {"message", message},
+                {"type", "invalid_request_error"},
+                {"details", details}
+            }}
+        };
+        if (!param.empty()) {
+            error["error"]["param"] = param;
+        }
+        return Response(400, error);
+    }
+    
     Response unauthorized(const std::string& message) {
         return Response(401, {
             {"error", {
@@ -124,6 +140,20 @@ protected:
         });
     }
     
+    // Enhanced version with error code for backward compatibility
+    Response serverErrorWithCode(const std::string& message, const std::string& code) {
+        nlohmann::json error = {
+            {"error", {
+                {"message", message},
+                {"type", "server_error"}
+            }}
+        };
+        if (!code.empty()) {
+            error["error"]["code"] = code;
+        }
+        return Response(500, error);
+    }
+    
     Response serviceUnavailable(const std::string& message) {
         return Response(503, {
             {"error", {
@@ -131,6 +161,20 @@ protected:
                 {"type", "service_unavailable"}
             }}
         });
+    }
+    
+    // Enhanced version with error code for backward compatibility  
+    Response serviceUnavailableWithCode(const std::string& message, const std::string& code) {
+        nlohmann::json error = {
+            {"error", {
+                {"message", message},
+                {"type", "service_unavailable"}
+            }}
+        };
+        if (!code.empty()) {
+            error["error"]["code"] = code;
+        }
+        return Response(503, error);
     }
     
     /**

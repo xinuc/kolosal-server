@@ -24,12 +24,11 @@ BaseController::Response DownloadsController::getAllDownloads() {
         auto downloads = download_manager_->getAllActiveDownloads();
         nlohmann::json downloadsArray = nlohmann::json::array();
         
-        // Statistics for summary
-        int active_downloads = 0;
-        int completed_downloads = 0;
-        int failed_downloads = 0;
-        int startup_downloads = 0;
-        int regular_downloads = 0;
+        // Count startup vs regular downloads and model types
+        int startup_count = 0;
+        int regular_count = 0;
+        int embedding_downloads = 0;
+        int llm_downloads = 0;
         
         for (const auto& [modelId, progress] : downloads) {
             // Add download_type field for list responses
@@ -38,30 +37,29 @@ BaseController::Response DownloadsController::getAllDownloads() {
             downloadsArray.push_back(downloadInfo);
             
             // Update statistics
-            if (progress->status == "downloading" || progress->status == "creating_engine") {
-                active_downloads++;
-            } else if (progress->status == "completed") {
-                completed_downloads++;
-            } else if (progress->status == "failed") {
-                failed_downloads++;
+            if (progress->engine_params) {
+                startup_count++;
+            } else {
+                regular_count++;
             }
             
-            if (progress->engine_params) {
-                startup_downloads++;
+            // Count model types
+            const std::string type = progress->engine_params ? progress->engine_params->model_type : inferModelType(progress);
+            if (type == "embedding") {
+                embedding_downloads++;
             } else {
-                regular_downloads++;
+                llm_downloads++;
             }
         }
         
         nlohmann::json response = {
-            {"downloads", downloadsArray},
+            {"active_downloads", downloadsArray},
             {"summary", {
-                {"total_downloads", static_cast<int>(downloads.size())},
-                {"active_downloads", active_downloads},
-                {"completed_downloads", completed_downloads},
-                {"failed_downloads", failed_downloads},
-                {"startup_downloads", startup_downloads},
-                {"regular_downloads", regular_downloads}
+                {"total_active", static_cast<int>(downloads.size())},
+                {"startup_downloads", startup_count},
+                {"regular_downloads", regular_count},
+                {"embedding_model_downloads", embedding_downloads},
+                {"llm_model_downloads", llm_downloads}
             }},
             {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count()}

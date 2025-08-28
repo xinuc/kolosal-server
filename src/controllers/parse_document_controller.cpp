@@ -30,12 +30,14 @@ BaseController::Response ParseDocumentController::parsePDF(const nlohmann::json&
     try {
         // Validate request
         if (!request.contains("data") || !request["data"].is_string()) {
-            return badRequest("Missing or invalid 'data' field - expected base64-encoded PDF data");
+            return badRequestWithDetails("Missing or invalid 'data' field", 
+                                         "Expected base64-encoded document data as string");
         }
         
         std::string base64_data = request["data"];
         if (base64_data.empty()) {
-            return badRequest("Empty document data");
+            return badRequestWithDetails("Empty document data", 
+                                         "Document data cannot be empty");
         }
         
         // Decode base64
@@ -88,12 +90,14 @@ BaseController::Response ParseDocumentController::parseDOCX(const nlohmann::json
     try {
         // Validate request
         if (!request.contains("data") || !request["data"].is_string()) {
-            return badRequest("Missing or invalid 'data' field - expected base64-encoded DOCX data");
+            return badRequestWithDetails("Missing or invalid 'data' field", 
+                                         "Expected base64-encoded DOCX data as string");
         }
         
         std::string base64_data = request["data"];
         if (base64_data.empty()) {
-            return badRequest("Empty document data");
+            return badRequestWithDetails("Empty document data", 
+                                         "Document data cannot be empty");
         }
         
         // Decode base64
@@ -140,12 +144,14 @@ BaseController::Response ParseDocumentController::parseHTML(const nlohmann::json
     try {
         // Validate request
         if (!request.contains("html") || !request["html"].is_string()) {
-            return badRequest("Missing or invalid 'html' field - expected HTML content as string");
+            return badRequestWithDetails("Missing or invalid 'html' field", 
+                                         "Expected HTML content as string");
         }
         
         std::string html_content = request["html"];
         if (html_content.empty()) {
-            return badRequest("Empty HTML content");
+            return badRequestWithDetails("Empty HTML content", 
+                                         "HTML content cannot be empty");
         }
         
         ServerLogger::logDebug("Converting HTML to Markdown (length: %zu)", html_content.length());

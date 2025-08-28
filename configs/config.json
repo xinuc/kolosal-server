@@ -87,5 +87,14 @@
     "features": {
         "health_check": true,
         "metrics": false
-    }
+    },
+    "inference_engines": [
+        {
+            "name": "llama-cpu",
+            "library_path": "./build/lib/libllama-cpu.dylib",
+            "description": "LLaMA engine for CPU/Metal inference",
+            "load_on_startup": true
+        }
+    ],
+    "default_inference_engine": "llama-cpu"
 }
